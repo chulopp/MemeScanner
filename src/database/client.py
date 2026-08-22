@@ -2,7 +2,7 @@ import asyncio
 from typing import Optional, Any
 from supabase import create_client, Client
 from src.config import settings
-from src.database.models import TokenModel, FilterResultModel, WalletModel
+from src.database.models import TokenModel, FilterResultModel, WalletModel, WalletRelationshipModel
 from src.utils.logger import logger
 
 
@@ -159,6 +159,37 @@ class DatabaseManager:
         async with self._lock:
             self._in_memory_filters[result.token_address] = data
             return True
+
+    async def batch_insert_relationships(self, relationships: list[WalletRelationshipModel]) -> bool:
+        """Batch insert detected wallet funding relationships."""
+        if not relationships:
+            return True
+
+        rows = [
+            {
+                "wallet_a": r.wallet_a,
+                "wallet_b": r.wallet_b,
+                "relationship_type": r.relationship_type,
+                "hop_distance": r.hop_distance,
+                "detected_at": r.detected_at.isoformat(),
+                "shared_funding_sol": r.shared_funding_sol,
+                "confidence_score": r.confidence_score
+            }
+            for r in relationships
+        ]
+
+        if self._connected and self._client:
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None,
+                    lambda: self._client.table("wallet_relationships").insert(rows).execute()
+                )
+                return True
+            except Exception as e:
+                logger.warning(f"Supabase batch insert wallet_relationships error: {e}")
+
+        return True
 
 
 db_manager = DatabaseManager()

@@ -41,6 +41,7 @@ def print_token_table(tokens_data: list[dict]):
     table.add_column("Venue", style="yellow")
     table.add_column("Status", style="bold")
     table.add_column("Dev Buy %", justify="right")
+    table.add_column("Bundle %", justify="right", style="bold magenta")
     table.add_column("LP Lock %", justify="right")
     table.add_column("Scalp Flags", justify="center")
     table.add_column("Reason / Notes", style="dim")
@@ -60,6 +61,7 @@ def print_token_table(tokens_data: list[dict]):
             t.get("launch_venue", ""),
             status_formatted,
             f"{t.get('dev_holding_pct', 0.0):.1f}%",
+            f"{t.get('sniper_bundle_pct', 0.0):.1f}%",
             f"{t.get('lp_lock_pct', 0.0):.1f}%",
             str(t.get("instant_scalp_flags_count", 0)),
             t.get("rejection_reason", "-") or "-"

@@ -4,8 +4,9 @@ from src.ingestion.schemas import RawTokenEvent
 from src.filters.schemas import SafetyCheckResult
 from src.filters.pump_safety import pump_safety_filter
 from src.filters.raydium_safety import raydium_safety_filter
+from src.filters.bundling import bundling_engine, BundlingResult
 from src.database.client import db_manager
-from src.database.models import FilterResultModel
+from src.database.models import FilterResultModel, WalletRelationshipModel
 from src.utils.logger import logger
 
 
@@ -19,6 +20,7 @@ class FilterPipeline:
         """Evaluates a raw token event against safety filters based on its venue."""
         logger.info(f"🔍 Analyzing Safety Filters for {event.symbol} ({event.token_address[:8]}...) [{event.launch_venue.upper()}]")
 
+        # --- Phase 1: Hard Safety & Instant Scalp Filters ---
         if event.launch_venue == "pump_fun":
             result = await pump_safety_filter.evaluate(event)
         elif event.launch_venue == "raydium":
@@ -26,6 +28,47 @@ class FilterPipeline:
         else:
             # Default fallback evaluation
             result = await pump_safety_filter.evaluate(event)
+
+        # --- Phase 2: Bundling & 2-Hop Funding Graph Engine ---
+        # Run bundling & funding graph analysis if passed preliminary safety
+        if result.filter_pass:
+            logger.info(f"🕸️ Running Bundling & 2-Hop Graph Analysis on {event.symbol} ({event.token_address[:8]}...)...")
+            bundling_res: BundlingResult = await bundling_engine.evaluate_token_bundling(
+                mint_address=event.token_address,
+                total_supply=event.total_supply,
+                deployer_address=event.deployer_wallet_address
+            )
+
+            result.sniper_bundle_pct = bundling_res.sniper_bundle_pct
+            result.raw_check_data["bundling_details"] = bundling_res.raw_cluster_data
+
+            # Persist detected wallet relationships
+            if bundling_res.relationships:
+                rel_models = [
+                    WalletRelationshipModel(
+                        wallet_a=r["wallet_a"],
+                        wallet_b=r["wallet_b"],
+                        relationship_type=r["relationship_type"],
+                        hop_distance=r.get("hop_distance", 1),
+                        shared_funding_sol=r.get("shared_funding_sol", 0.0),
+                        confidence_score=r.get("confidence_score", 0.0)
+                    )
+                    for r in bundling_res.relationships
+                ]
+                await db_manager.batch_insert_relationships(rel_models)
+
+            # Check if bundle exceeds maximum allowed threshold
+            if bundling_res.is_bundle_risk:
+                result.filter_pass = False
+                bundle_reason = (
+                    f"Bundle Monopoly Risk: {bundling_res.sniper_bundle_pct:.1f}% supply controlled "
+                    f"by Sybil cluster of {bundling_res.max_cluster_size} wallets"
+                )
+                result.rejection_reason = (
+                    f"{result.rejection_reason} | {bundle_reason}"
+                    if result.rejection_reason else bundle_reason
+                )
+
 
         # 1. Update Token status in Database
         new_status = "PASSED_SAFETY" if result.filter_pass else "REJECTED"

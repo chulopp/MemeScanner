@@ -38,3 +38,14 @@ class WalletModel(BaseModel):
     rug_count_history: int = 0
     total_tokens_launched: int = 0
     tags: list[str] = Field(default_factory=list)
+
+
+class WalletRelationshipModel(BaseModel):
+    wallet_a: str
+    wallet_b: str
+    relationship_type: str  # 'DIRECT_FUNDING' | 'SHARED_FUNDER_HOP1' | 'SHARED_FUNDER_HOP2'
+    hop_distance: int = 1
+    detected_at: datetime = Field(default_factory=datetime.utcnow)
+    shared_funding_sol: float = 0.0
+    confidence_score: float = 0.0
+

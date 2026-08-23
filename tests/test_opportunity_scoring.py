@@ -346,3 +346,100 @@ async def test_sol_price_feed_caching_and_fallback():
     with patch.object(fresh_client, "_get_client", side_effect=Exception("Network error")):
         fallback_price = await fresh_client.get_sol_price_usd()
         assert fallback_price == 180.0
+
+
+@pytest.mark.asyncio
+async def test_vol_velocity_dexscreener_fallback():
+    """Verify that DexScreener fallback activates when Helius API is unavailable or missing key."""
+    engine = VolumeVelocityEngine()
+
+    mock_dex_resp = MagicMock()
+    mock_dex_resp.status_code = 200
+    mock_dex_resp.json.return_value = {
+        "pairs": [
+            {
+                "chainId": "solana",
+                "txns": {
+                    "m5": {"buys": 20, "sells": 5}
+                },
+                "volume": {"m5": 1800.0}
+            }
+        ]
+    }
+
+    # Simulate empty/no Helius key
+    with patch("src.opportunity.vol_velocity.settings.helius_api_key", None):
+        with patch.object(engine, "_get_client") as mock_http:
+            http_inst = AsyncMock()
+            http_inst.get.return_value = mock_dex_resp
+            mock_http.return_value = http_inst
+
+            res = await engine.calculate_velocity("MINT_DEX_TEST", initial_buy_sol=0.0)
+
+            assert res.is_successful is True
+            assert res.provider_used == "dexscreener"
+            assert res.buy_count == 20
+            assert res.sell_count == 5
+            assert res.net_buy_pressure_ratio == 4.0
+            assert res.score == 80.0
+
+
+@pytest.mark.asyncio
+async def test_vol_velocity_all_providers_fail_graceful_degradation():
+    """Verify that if all volume providers fail and no initial buy, engine sets is_successful=False."""
+    engine = VolumeVelocityEngine()
+
+    with patch("src.opportunity.vol_velocity.settings.helius_api_key", None):
+        with patch.object(engine, "_fetch_from_dexscreener", AsyncMock(return_value=None)):
+            with patch.object(engine, "_fetch_from_rpc_signatures", AsyncMock(return_value=None)):
+                res = await engine.calculate_velocity("MINT_FAIL", initial_buy_sol=0.0)
+
+                assert res.is_successful is False
+                assert res.score == 0.0
+                assert res.provider_used == "none"
+
+
+@pytest.mark.asyncio
+async def test_smart_money_empty_registry_weight_redistribution():
+    """Verify that when smart money registry is empty, scorer redistributes weight to remaining active components."""
+    scorer = OpportunityScorer()
+
+    event = RawTokenEvent(
+        token_address="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        symbol="OPPCOIN",
+        name="Opportunity Coin",
+        deployer_wallet_address="2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo",
+        launch_venue="pump_fun",
+        initial_buy_amount=10_000_000.0,
+        total_supply=1_000_000_000.0
+    )
+
+    mock_vol = VolumeVelocityResult(
+        score=80.0, buy_count=10, sell_count=2, buy_volume_sol=5.0,
+        sell_volume_sol=1.0, net_buy_pressure_ratio=5.0, is_successful=True
+    )
+    # Smart money returns is_successful=False because registry is empty
+    mock_smart_empty = SmartMoneyMatchResult(
+        score=0.0, matched_wallets_count=0, matched_wallets=[],
+        total_tracked_wallets=0, is_successful=False
+    )
+    mock_fee = GlobalFeeResult(
+        score=60.0, median_fee_micro_lamports=25000, max_fee_micro_lamports=50000,
+        p90_fee_micro_lamports=40000, valid_fee_sample_count=50, is_successful=True
+    )
+
+    with patch("src.opportunity.scorer.volume_velocity_engine.calculate_velocity", AsyncMock(return_value=mock_vol)):
+        with patch("src.opportunity.scorer.smart_money_engine.evaluate_token_smart_money", AsyncMock(return_value=mock_smart_empty)):
+            with patch("src.opportunity.scorer.global_fee_engine.calculate_fee_urgency", AsyncMock(return_value=mock_fee)):
+                res: OpportunityScoreResult = await scorer.score_token(event)
+
+                assert res.opportunity_score > 0.0
+                # Active components should only be vol_velocity and global_fee (smart_money excluded cleanly)
+                assert set(res.active_components) == {"vol_velocity", "global_fee"}
+                assert "smart_money" not in res.active_components
+                # Base weights: vol=0.35, fee=0.15 (total active base weight = 0.50)
+                # Normalized effective weights: vol = 0.35/0.50 = 0.70, fee = 0.15/0.50 = 0.30
+                assert res.weights_used["vol_velocity"] == 0.70
+                assert res.weights_used["global_fee"] == 0.30
+                # Score = 0.70*80 + 0.30*60 = 56 + 18 = 74.0
+                assert res.opportunity_score == 74.0

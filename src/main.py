@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import signal
 import sys
+from typing import Optional
 
 # Ensure UTF-8 output on Windows console
 if hasattr(sys.stdout, "reconfigure"):

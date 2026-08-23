@@ -68,7 +68,18 @@ class SmartMoneyEngine:
             await self._ensure_cache()
             tracked_count = len(self._cached_wallets)
 
-            if not candidate_wallet_addresses or tracked_count == 0:
+            if tracked_count == 0:
+                # No wallets in registry yet (waiting for user seed list) -> mark unavailable so weight redistributes
+                return SmartMoneyMatchResult(
+                    score=0.0,
+                    matched_wallets_count=0,
+                    matched_wallets=[],
+                    total_tracked_wallets=0,
+                    is_successful=False,
+                    raw_data={"note": "Smart Money registry is empty; weight dynamically redistributed"}
+                )
+
+            if not candidate_wallet_addresses:
                 return SmartMoneyMatchResult(
                     score=0.0,
                     matched_wallets_count=0,

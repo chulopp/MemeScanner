@@ -21,6 +21,10 @@ from src.ingestion.schemas import RawTokenEvent
 from src.filters.pipeline import filter_pipeline
 from src.filters.schemas import SafetyCheckResult
 from src.filters.funding_graph import funding_tracer
+from src.opportunity.smart_money import smart_money_engine
+from src.database.client import db_manager
+from src.database.models import SmartMoneyProfileModel
+from src.utils.price_feed import price_feed
 from src.utils.logger import logger, console, print_token_table, mask_url
 from src.utils.solana_rpc import solana_rpc
 
@@ -34,6 +38,7 @@ class MemeScannerApp:
         self.processed_tokens: list[dict] = []
         self.ingestion_manager = IngestionManager(self._on_token_ingested)
         self._shutdown_event = asyncio.Event()
+        self._evaluator_task: Optional[asyncio.Task] = None
 
     async def _on_token_ingested(self, event: RawTokenEvent):
         """Callback invoked whenever a new token is ingested."""
@@ -55,12 +60,48 @@ class MemeScannerApp:
             "rejection_reason": result.rejection_reason
         })
 
+    async def _periodic_smart_money_evaluator(self):
+        """Background periodic worker evaluating wallet promotion & demotion every 24h."""
+        while not self._shutdown_event.is_set():
+            try:
+                wallets_data = await db_manager.get_smart_money_wallets(active_only=False)
+                if wallets_data:
+                    promoted = 0
+                    demoted = 0
+                    for w in wallets_data:
+                        try:
+                            profile = SmartMoneyProfileModel(**w)
+                            original_tier = profile.tier
+                            evaluated = await smart_money_engine.evaluate_promotion_and_demotion(profile)
+                            if evaluated.tier != original_tier:
+                                await db_manager.upsert_smart_money_wallet(evaluated)
+                                if evaluated.tier == "ACTIVE":
+                                    promoted += 1
+                                elif evaluated.tier == "DEMOTED":
+                                    demoted += 1
+                        except Exception as e:
+                            logger.debug(f"Error evaluating wallet profile: {e}")
+
+                    if promoted > 0 or demoted > 0:
+                        logger.info(f"🔄 Smart Money Evaluator: {promoted} promoted to ACTIVE, {demoted} demoted.")
+            except Exception as loop_err:
+                logger.debug(f"Smart money evaluator loop error: {loop_err}")
+
+            # Run every 24 hours (or stop on shutdown)
+            try:
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=86400.0)
+            except asyncio.TimeoutError:
+                pass
+
     async def run(self):
         console.print("\n[bold cyan]========================================================[/bold cyan]")
         console.print("[bold yellow]Solana Meme Coin Safety & Signal Bot (Fase 0, 1, 2 & 3)[/bold yellow]")
         console.print(f"[dim]Helius RPC: {mask_url(settings.helius_rpc_url)}[/dim]")
         console.print(f"[dim]PumpPortal WS: {settings.pumpportal_ws_url}[/dim]")
         console.print("[bold cyan]========================================================[/bold cyan]\n")
+
+        # Start background periodic smart money evaluator
+        self._evaluator_task = asyncio.create_task(self._periodic_smart_money_evaluator())
 
         # Start ingestion listeners
         await self.ingestion_manager.start()
@@ -81,9 +122,12 @@ class MemeScannerApp:
     async def shutdown(self):
         logger.info("Shutting down MemeScanner...")
         self._shutdown_event.set()
+        if self._evaluator_task and not self._evaluator_task.done():
+            self._evaluator_task.cancel()
         await self.ingestion_manager.stop()
         await funding_tracer.close()
         await solana_rpc.close()
+        await price_feed.close()
 
         # Print summary table if any tokens were processed
         if self.processed_tokens:

@@ -76,7 +76,10 @@ class VolumeVelocityEngine:
             async with self._semaphore:
                 try:
                     client = await self._get_client()
-                    response = await client.get(url, params=params)
+                    response = await asyncio.wait_for(
+                        client.get(url, params=params),
+                        timeout=8.0
+                    )
                     if response.status_code == 200:
                         txs = response.json()
                         if isinstance(txs, list) and txs:
@@ -85,56 +88,89 @@ class VolumeVelocityEngine:
                                 if tx_time < cutoff_ts:
                                     continue
 
-                                tx_type = tx.get("type", "").upper()
-                                native_transfers = tx.get("nativeTransfers", [])
+                                events = tx.get("events", {})
+                                swap_event = events.get("swap") if isinstance(events, dict) else None
+                                fee_payer = tx.get("feePayer", "")
                                 token_transfers = tx.get("tokenTransfers", [])
+                                native_transfers = tx.get("nativeTransfers", [])
 
-                                # Classify swap direction:
                                 is_buy = False
                                 is_sell = False
+                                sol_amount = 0.0
 
-                                for tt in token_transfers:
-                                    if tt.get("mint") == mint_address:
-                                        # User received tokens = buy
+                                # 1. Check structured swap event if parsed by Helius
+                                if isinstance(swap_event, dict):
+                                    token_outputs = swap_event.get("tokenOutputs", [])
+                                    token_inputs = swap_event.get("tokenInputs", [])
+                                    native_input = swap_event.get("nativeInput")
+                                    native_output = swap_event.get("nativeOutput")
+
+                                    # Received target token = BUY
+                                    if any(to.get("mint") == mint_address for to in token_outputs):
                                         is_buy = True
-                                        break
+                                        if native_input and isinstance(native_input, dict):
+                                            sol_amount = native_input.get("amount", 0) / 1_000_000_000.0
+                                    # Spent target token = SELL
+                                    elif any(ti.get("mint") == mint_address for ti in token_inputs):
+                                        is_sell = True
+                                        if native_output and isinstance(native_output, dict):
+                                            sol_amount = native_output.get("amount", 0) / 1_000_000_000.0
 
-                                if not is_buy:
-                                    for nt in native_transfers:
-                                        # Outbound SOL from contract/pool = sell
-                                        if nt.get("fromUserAccount") == mint_address:
+                                # 2. Fallback to transfer stream analysis
+                                if not is_buy and not is_sell and token_transfers:
+                                    # Target token transfers
+                                    mint_transfers = [tt for tt in token_transfers if tt.get("mint") == mint_address]
+                                    for tt in mint_transfers:
+                                        to_user = tt.get("toUserAccount")
+                                        from_user = tt.get("fromUserAccount")
+
+                                        # If fee payer or trader receives token -> BUY
+                                        if to_user and (to_user == fee_payer or fee_payer in [nt.get("fromUserAccount") for nt in native_transfers]):
+                                            is_buy = True
+                                            break
+                                        # If fee payer or trader sends token -> SELL
+                                        elif from_user and (from_user == fee_payer or fee_payer in [nt.get("toUserAccount") for nt in native_transfers]):
                                             is_sell = True
                                             break
 
+                                    # Sum SOL transferred in transaction
+                                    for nt in native_transfers:
+                                        if nt.get("amount"):
+                                            sol_amount += nt.get("amount", 0) / 1_000_000_000.0
+
                                 if is_buy:
                                     buy_count += 1
-                                    for nt in native_transfers:
-                                        buy_vol_sol += nt.get("amount", 0) / 1_000_000_000.0
-                                elif is_sell or tx_type == "SWAP":
+                                    buy_vol_sol += sol_amount
+                                elif is_sell:
                                     sell_count += 1
-                                    for nt in native_transfers:
-                                        sell_vol_sol += nt.get("amount", 0) / 1_000_000_000.0
-                                else:
-                                    buy_count += 1
+                                    sell_vol_sol += sol_amount
+                                # Note: Unclassified non-swap transactions are strictly ignored (not counted as buy)
+
+                except asyncio.TimeoutError:
+                    logger.debug(f"Helius Volume Velocity timed out for {mint_address[:8]} after 8s")
                 except Exception as e:
                     logger.debug(f"Helius Volume Velocity error for {mint_address[:8]}: {e}")
 
-        # Baseline fallback if no external transactions indexed yet (very fresh token)
+        # Baseline fallback if no external transactions indexed yet (brand new token)
         if buy_count == 0 and sell_count == 0:
-            buy_count = 1  # Deployer initial buy
-            sell_count = 0
-            buy_vol_sol = max(initial_buy_sol, 0.5)
+            if initial_buy_sol > 0:
+                buy_count = 1
+                buy_vol_sol = initial_buy_sol
+                ratio = 1.0
+                normalized_score = 25.0  # Mild baseline score for initial dev buy
+            else:
+                ratio = 0.0
+                normalized_score = 0.0
+        else:
+            ratio = buy_count / max(sell_count, 1.0)
+            max_ratio = settings.vol_velocity_buy_sell_ratio_max
+            normalized_score = min((ratio / max_ratio) * 100.0, 100.0)
+
+            # Penalty if sell count is higher than buy count
+            if sell_count > buy_count:
+                normalized_score = max(normalized_score * 0.5, 0.0)
 
         total_swaps = buy_count + sell_count
-        ratio = buy_count / max(sell_count, 1.0)
-
-        # Min-max normalization: max ratio (e.g. 5.0) maps to 100 score
-        max_ratio = settings.vol_velocity_buy_sell_ratio_max
-        normalized_score = min((ratio / max_ratio) * 100.0, 100.0)
-
-        # Penalty if sell count is higher than buy count
-        if sell_count > buy_count:
-            normalized_score = max(normalized_score * 0.5, 0.0)
 
         return VolumeVelocityResult(
             score=round(normalized_score, 2),

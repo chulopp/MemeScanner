@@ -43,11 +43,12 @@ class FilterPipeline:
             )
 
             result.sniper_bundle_pct = bundling_res.sniper_bundle_pct
+            result.top10_holder_pct = bundling_res.top10_holder_pct
             result.raw_check_data["bundling_details"] = bundling_res.raw_cluster_data
 
-            if bundling_res.clusters:
-                for c in bundling_res.clusters:
-                    candidate_wallets.extend(c.get("wallets", []))
+            # Include all analyzed candidate wallets (clean early buyers + cluster members) for Smart Money matching
+            if bundling_res.analyzed_wallets:
+                candidate_wallets.extend(bundling_res.analyzed_wallets)
 
             # Persist detected wallet relationships
             if bundling_res.relationships:

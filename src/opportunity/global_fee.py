@@ -33,12 +33,30 @@ class GlobalFeeUrgencyEngine:
     Verifies genuine transaction urgency via priority fees and filters zero-fee wash trading.
     """
 
-    async def calculate_fee_urgency(self) -> GlobalFeeResult:
+    async def calculate_fee_urgency(
+        self,
+        mint_address: Optional[str] = None,
+        extra_accounts: Optional[list[str]] = None
+    ) -> GlobalFeeResult:
         """
-        Fetches recent Solana prioritization fees and scores urgency.
+        Fetches prioritization fees for target token accounts (or general fallback) and scores urgency.
         """
         try:
-            raw_fees = await solana_rpc.get_recent_prioritization_fees()
+            target_addrs = []
+            if mint_address:
+                target_addrs.append(mint_address)
+            if extra_accounts:
+                target_addrs.extend(extra_accounts)
+
+            # Query token-specific priority fees first if address provided
+            raw_fees = []
+            if target_addrs:
+                raw_fees = await solana_rpc.get_recent_prioritization_fees(target_addrs)
+
+            # Fallback to general RPC priority fees if token-specific returns empty
+            if not raw_fees:
+                raw_fees = await solana_rpc.get_recent_prioritization_fees()
+
             if not raw_fees:
                 # Default neutral score if RPC returns empty
                 return GlobalFeeResult(

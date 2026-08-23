@@ -35,18 +35,27 @@ class SmartMoneyEngine:
         self._cached_wallets: set[str] = set()
         self._last_cache_refresh: Optional[datetime] = None
         self._cache_ttl_seconds = 300  # 5 minutes
+        self._cache_lock = asyncio.Lock()
 
     async def _ensure_cache(self):
-        """Refreshes active smart money wallet cache if expired or empty."""
+        """Refreshes active smart money wallet cache if expired or empty with lock safety."""
         now = datetime.utcnow()
         if (
             not self._cached_wallets
             or not self._last_cache_refresh
             or (now - self._last_cache_refresh).total_seconds() > self._cache_ttl_seconds
         ):
-            wallets_data = await db_manager.get_smart_money_wallets(active_only=True)
-            self._cached_wallets = {w["wallet_address"] for w in wallets_data if "wallet_address" in w}
-            self._last_cache_refresh = now
+            async with self._cache_lock:
+                # Double-check pattern after acquiring lock
+                now_inner = datetime.utcnow()
+                if (
+                    not self._cached_wallets
+                    or not self._last_cache_refresh
+                    or (now_inner - self._last_cache_refresh).total_seconds() > self._cache_ttl_seconds
+                ):
+                    wallets_data = await db_manager.get_smart_money_wallets(active_only=True)
+                    self._cached_wallets = {w["wallet_address"] for w in wallets_data if "wallet_address" in w}
+                    self._last_cache_refresh = now_inner
 
     async def evaluate_token_smart_money(
         self,

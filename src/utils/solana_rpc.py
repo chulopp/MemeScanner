@@ -138,9 +138,13 @@ class SolanaRpcClient:
         age_seconds = time.time() - block_time
         return age_seconds / 86400.0
 
-    async def get_recent_prioritization_fees(self) -> list[int]:
-        """Returns list of recent prioritization fees in micro-lamports."""
-        res = await self._rpc_call("getRecentPrioritizationFees", [])
+    async def get_recent_prioritization_fees(self, addresses: Optional[list[str]] = None) -> list[int]:
+        """
+        Returns list of recent prioritization fees in micro-lamports.
+        If addresses list is provided, returns prioritization fees specific to those accounts.
+        """
+        params = [addresses] if addresses else []
+        res = await self._rpc_call("getRecentPrioritizationFees", params)
         if res and isinstance(res, list):
             return [item.get("prioritizationFee", 0) for item in res]
         return []

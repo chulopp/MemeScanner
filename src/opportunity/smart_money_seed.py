@@ -156,7 +156,7 @@ CURATED_SMART_MONEY_SEEDS: list[dict] = [
         "notes": "High volume Jito bundle trader"
     },
     {
-        "wallet_address": "4e2P6hR5nK9p3V7q8x1m2y3z4a5b6c7d8e9f0g1h2i32",
+        "wallet_address": "9p2aLz9c4VnmQ9eRzF6kWtM3yU8sJbDx7CvH1p5gB4K6",
         "net_realized_profit_sol": 42.1,
         "total_volume_sol": 205.0,
         "total_trades_recorded": 26,

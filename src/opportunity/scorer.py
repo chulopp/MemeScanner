@@ -10,6 +10,7 @@ from src.database.client import db_manager
 from src.opportunity.vol_velocity import volume_velocity_engine, VolumeVelocityResult
 from src.opportunity.smart_money import smart_money_engine, SmartMoneyMatchResult
 from src.opportunity.global_fee import global_fee_engine, GlobalFeeResult
+from src.utils.price_feed import price_feed
 from src.utils.logger import logger
 
 
@@ -57,7 +58,9 @@ class OpportunityScorer:
         smart_task = smart_money_engine.evaluate_token_smart_money(
             candidate_wallet_addresses=wallets_to_check
         )
-        fee_task = global_fee_engine.calculate_fee_urgency()
+        fee_task = global_fee_engine.calculate_fee_urgency(
+            mint_address=token_addr
+        )
 
         vol_res, smart_res, fee_res = await asyncio.gather(
             vol_task, smart_task, fee_task, return_exceptions=True
@@ -138,6 +141,9 @@ class OpportunityScorer:
 
         final_opportunity_score = round(min(max(weighted_score_sum, 0.0), 100.0), 2)
 
+        # Get live SOL/USD price for accurate valuation
+        sol_price = await price_feed.get_sol_price_usd()
+
         # Build snapshot model for database persistence
         snapshot = MetricSnapshotModel(
             token_address=token_addr,
@@ -149,8 +155,8 @@ class OpportunityScorer:
             score_holder_curve=component_scores["holder_curve"],
             score_social_meta=component_scores["social_meta"],
             market_cap_usd=0.0,
-            liquidity_usd=event.initial_sol_liquidity * 180.0 if event.initial_sol_liquidity else 0.0,
-            volume_5m_usd=(vol_res.buy_volume_sol + vol_res.sell_volume_sol) * 180.0 if isinstance(vol_res, VolumeVelocityResult) else 0.0,
+            liquidity_usd=round(event.initial_sol_liquidity * sol_price, 2) if event.initial_sol_liquidity else 0.0,
+            volume_5m_usd=round((vol_res.buy_volume_sol + vol_res.sell_volume_sol) * sol_price, 2) if isinstance(vol_res, VolumeVelocityResult) else 0.0,
             buy_tx_count_5m=vol_res.buy_count if isinstance(vol_res, VolumeVelocityResult) else 0,
             sell_tx_count_5m=vol_res.sell_count if isinstance(vol_res, VolumeVelocityResult) else 0,
             net_buy_pressure_ratio=vol_res.net_buy_pressure_ratio if isinstance(vol_res, VolumeVelocityResult) else 0.0,

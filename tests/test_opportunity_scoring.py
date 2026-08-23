@@ -19,7 +19,12 @@ async def test_vol_velocity_high_buy_pressure():
     engine = VolumeVelocityEngine()
 
     mock_txs = [
-        {"timestamp": 1000000000 + i, "type": "SWAP", "tokenTransfers": [{"mint": "MINT123"}]}
+        {
+            "timestamp": 1000000000 + i,
+            "feePayer": f"BUYER_{i}",
+            "tokenTransfers": [{"mint": "MINT123", "toUserAccount": f"BUYER_{i}", "fromUserAccount": "POOL"}],
+            "nativeTransfers": [{"fromUserAccount": f"BUYER_{i}", "toUserAccount": "POOL", "amount": 1_000_000_000}]
+        }
         for i in range(10)
     ]
 
@@ -45,9 +50,21 @@ async def test_vol_velocity_sell_penalty():
     """Verify that when sells outnumber buys, score receives a 50% dampening penalty."""
     engine = VolumeVelocityEngine()
 
-    # 2 buys, 8 sells
+    # 1 buy, 8 sells
     mock_txs = [
-        {"timestamp": 1000000000 + i, "type": "SWAP", "nativeTransfers": [{"fromUserAccount": "MINT123", "amount": 1000000000}]}
+        {
+            "timestamp": 1000000000,
+            "feePayer": "BUYER_0",
+            "tokenTransfers": [{"mint": "MINT123", "toUserAccount": "BUYER_0", "fromUserAccount": "POOL"}],
+            "nativeTransfers": [{"fromUserAccount": "BUYER_0", "toUserAccount": "POOL", "amount": 500_000_000}]
+        }
+    ] + [
+        {
+            "timestamp": 1000000000 + i + 1,
+            "feePayer": f"SELLER_{i}",
+            "tokenTransfers": [{"mint": "MINT123", "fromUserAccount": f"SELLER_{i}", "toUserAccount": "POOL"}],
+            "nativeTransfers": [{"fromUserAccount": "POOL", "toUserAccount": f"SELLER_{i}", "amount": 500_000_000}]
+        }
         for i in range(8)
     ]
 
@@ -63,6 +80,7 @@ async def test_vol_velocity_sell_penalty():
             res = await engine.calculate_velocity("MINT123", window_seconds=300)
 
             assert res.sell_count >= 8
+            assert res.buy_count == 1
             assert res.score < 50.0  # Penalized
 
 
@@ -229,3 +247,102 @@ async def test_pipeline_integration_phase3_opportunity_score():
                     assert result.filter_pass is True
                     assert result.opportunity_score == 82.5
                     assert "opportunity_breakdown" in result.raw_check_data
+
+
+@pytest.mark.asyncio
+async def test_vol_velocity_direction_precision():
+    """Verify that swap direction parsing precisely detects buy vs sell and ignores unknown."""
+    engine = VolumeVelocityEngine()
+    mint = "MINT123"
+
+    mock_txs = [
+        # Buy: user receives target token in tokenTransfers, sends SOL
+        {
+            "timestamp": 1000000000,
+            "feePayer": "USER_BUYER_1",
+            "tokenTransfers": [{"mint": mint, "toUserAccount": "USER_BUYER_1", "fromUserAccount": "POOL_1"}],
+            "nativeTransfers": [{"fromUserAccount": "USER_BUYER_1", "toUserAccount": "POOL_1", "amount": 1_000_000_000}]
+        },
+        # Sell: user sends target token in tokenTransfers, receives SOL
+        {
+            "timestamp": 1000000010,
+            "feePayer": "USER_SELLER_1",
+            "tokenTransfers": [{"mint": mint, "fromUserAccount": "USER_SELLER_1", "toUserAccount": "POOL_1"}],
+            "nativeTransfers": [{"fromUserAccount": "POOL_1", "toUserAccount": "USER_SELLER_1", "amount": 1_000_000_000}]
+        },
+        # Unknown/Unrelated transfer: non-swap, should be ignored
+        {
+            "timestamp": 1000000020,
+            "feePayer": "RANDOM_FEE_PAYER",
+            "tokenTransfers": [{"mint": "OTHER_MINT", "toUserAccount": "USER_X"}],
+            "nativeTransfers": []
+        }
+    ]
+
+    with patch.object(engine, "_get_client") as mock_client_getter:
+        mock_client = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = mock_txs
+        mock_client.get.return_value = mock_response
+        mock_client_getter.return_value = mock_client
+
+        with patch("time.time", return_value=1000000050):
+            res = await engine.calculate_velocity(mint, window_seconds=300)
+
+            assert res.buy_count == 1
+            assert res.sell_count == 1
+            assert res.net_buy_pressure_ratio == 1.0
+
+
+@pytest.mark.asyncio
+async def test_token_specific_prioritization_fee():
+    """Verify that calculate_fee_urgency passes token mint address to solana_rpc."""
+    engine = GlobalFeeUrgencyEngine()
+    mint = "TOKEN_MINT_ABC"
+
+    with patch("src.opportunity.global_fee.solana_rpc.get_recent_prioritization_fees", AsyncMock(return_value=[50000, 75000, 100000])) as mock_rpc_call:
+        res = await engine.calculate_fee_urgency(mint_address=mint)
+
+        mock_rpc_call.assert_called_once_with([mint])
+        assert res.is_successful is True
+        assert res.median_fee_micro_lamports == 75000.0
+
+
+@pytest.mark.asyncio
+async def test_sol_price_feed_caching_and_fallback():
+    """Verify that price feed fetches, caches for 5 minutes, and falls back gracefully."""
+    from src.utils.price_feed import PriceFeedClient
+
+    client = PriceFeedClient(cache_ttl_seconds=300, default_sol_usd=180.0)
+
+    # 1. Successful Jupiter response
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "data": {
+            "So11111111111111111111111111111111111111112": {
+                "price": "215.50"
+            }
+        }
+    }
+
+    with patch.object(client, "_get_client") as mock_http:
+        http_inst = AsyncMock()
+        http_inst.get.return_value = mock_resp
+        mock_http.return_value = http_inst
+
+        price = await client.get_sol_price_usd()
+        assert price == 215.50
+
+        # 2. Second call should hit cache without new HTTP request
+        http_inst.get.reset_mock()
+        cached_price = await client.get_sol_price_usd()
+        assert cached_price == 215.50
+        http_inst.get.assert_not_called()
+
+    # 3. Fallback when network fails
+    fresh_client = PriceFeedClient(default_sol_usd=180.0)
+    with patch.object(fresh_client, "_get_client", side_effect=Exception("Network error")):
+        fallback_price = await fresh_client.get_sol_price_usd()
+        assert fallback_price == 180.0

@@ -155,3 +155,27 @@ async def test_deployer_fallback_uses_initial_buy():
 
         assert "DEPLOYER_WALLET_XYZ" in holdings
         assert holdings["DEPLOYER_WALLET_XYZ"] == 45_000_000.0
+
+
+@pytest.mark.asyncio
+async def test_bundling_returns_all_analyzed_wallets_and_top10_pct():
+    """Verify that BundlingResult contains all analyzed wallets (including clean ones) and accurate top10%."""
+    engine = BundlingEngine()
+
+    mock_holdings = {
+        "CLEAN_BUYER_1": 50_000_000.0,
+        "CLEAN_BUYER_2": 30_000_000.0,
+        "DEPLOYER_WALLET": 20_000_000.0
+    }
+
+    with patch.object(engine, "extract_early_buyers_and_top_holders", AsyncMock(return_value=mock_holdings)):
+        with patch("src.filters.bundling.funding_tracer.trace_wallets_batch", AsyncMock(return_value=[])):
+            with patch("src.filters.bundling.funding_tracer.analyze_clusters", return_value=([], 0.0, [])):
+                res = await engine.evaluate_token_bundling(
+                    mint_address="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                    total_supply=1_000_000_000.0
+                )
+
+                assert set(res.analyzed_wallets) == {"CLEAN_BUYER_1", "CLEAN_BUYER_2", "DEPLOYER_WALLET"}
+                # Total holdings: 100M / 1B = 10.0%
+                assert res.top10_holder_pct == 10.0

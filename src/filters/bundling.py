@@ -11,11 +11,13 @@ from src.utils.logger import logger
 class BundlingResult(BaseModel):
     token_address: str
     sniper_bundle_pct: float = 0.0
+    top10_holder_pct: float = 0.0
     is_bundle_risk: bool = False
     cluster_count: int = 0
     max_cluster_size: int = 0
     clusters: list[dict] = Field(default_factory=list)
     relationships: list[dict] = Field(default_factory=list)
+    analyzed_wallets: list[str] = Field(default_factory=list)
     analyzed_wallets_count: int = 0
     raw_cluster_data: dict[str, Any] = Field(default_factory=dict)
 
@@ -107,7 +109,10 @@ class BundlingEngine:
         # Step 3: Run cluster detection & Disjoint-Set grouping
         clusters, max_cluster_supply_pct, relationships = funding_tracer.analyze_clusters(nodes)
 
-        # Step 4: Decision threshold (> 25% supply in single Sybil cluster is a hard risk)
+        # Step 4: Calculate actual top holder percentage
+        top10_supply_pct = min((sum(wallet_holdings.values()) / total_supply) * 100.0, 100.0)
+
+        # Step 5: Decision threshold (> 25% supply in single Sybil cluster is a hard risk)
         is_risk = max_cluster_supply_pct > settings.max_sniper_bundle_pct
         max_cluster_size = max([c.get("wallets_count", 0) for c in clusters], default=0)
 
@@ -120,16 +125,19 @@ class BundlingEngine:
         return BundlingResult(
             token_address=mint_address,
             sniper_bundle_pct=max_cluster_supply_pct,
+            top10_holder_pct=round(top10_supply_pct, 2),
             is_bundle_risk=is_risk,
             cluster_count=len(clusters),
             max_cluster_size=max_cluster_size,
             clusters=clusters,
             relationships=relationships,
+            analyzed_wallets=list(wallet_holdings.keys()),
             analyzed_wallets_count=len(nodes),
             raw_cluster_data={
                 "clusters": clusters,
                 "node_traces_count": len(nodes),
-                "relationships_count": len(relationships)
+                "relationships_count": len(relationships),
+                "top10_holder_pct": round(top10_supply_pct, 2)
             }
         )
 

@@ -28,21 +28,23 @@ async def test_vol_velocity_high_buy_pressure():
         for i in range(10)
     ]
 
-    with patch.object(engine, "_get_client") as mock_client_getter:
-        mock_client = AsyncMock()
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = mock_txs
-        mock_client.get.return_value = mock_response
-        mock_client_getter.return_value = mock_client
+    with patch("src.opportunity.vol_velocity.settings.helius_api_key", "test_mock_api_key"):
+        with patch.object(engine, "_get_client") as mock_client_getter:
+            mock_client = AsyncMock()
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = mock_txs
+            mock_client.get.return_value = mock_response
+            mock_client_getter.return_value = mock_client
 
-        with patch("time.time", return_value=1000000050):
-            res = await engine.calculate_velocity("MINT123", window_seconds=300)
+            with patch("time.time", return_value=1000000050):
+                res = await engine.calculate_velocity("MINT123", window_seconds=300)
 
-            assert res.is_successful is True
-            assert res.buy_count >= 10
-            assert res.sell_count == 0
-            assert res.score == 100.0
+                assert res.is_successful is True
+                assert res.buy_count >= 10
+                assert res.sell_count == 0
+                assert res.score == 100.0
+                assert res.provider_used == "helius"
 
 
 @pytest.mark.asyncio
@@ -68,20 +70,22 @@ async def test_vol_velocity_sell_penalty():
         for i in range(8)
     ]
 
-    with patch.object(engine, "_get_client") as mock_client_getter:
-        mock_client = AsyncMock()
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = mock_txs
-        mock_client.get.return_value = mock_response
-        mock_client_getter.return_value = mock_client
+    with patch("src.opportunity.vol_velocity.settings.helius_api_key", "test_mock_api_key"):
+        with patch.object(engine, "_get_client") as mock_client_getter:
+            mock_client = AsyncMock()
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = mock_txs
+            mock_client.get.return_value = mock_response
+            mock_client_getter.return_value = mock_client
 
-        with patch("time.time", return_value=1000000050):
-            res = await engine.calculate_velocity("MINT123", window_seconds=300)
+            with patch("time.time", return_value=1000000050):
+                res = await engine.calculate_velocity("MINT123", window_seconds=300)
 
-            assert res.sell_count >= 8
-            assert res.buy_count == 1
-            assert res.score < 50.0  # Penalized
+                assert res.sell_count >= 8
+                assert res.buy_count == 1
+                assert res.score < 50.0  # Penalized
+                assert res.provider_used == "helius"
 
 
 @pytest.mark.asyncio
@@ -279,20 +283,45 @@ async def test_vol_velocity_direction_precision():
         }
     ]
 
-    with patch.object(engine, "_get_client") as mock_client_getter:
-        mock_client = AsyncMock()
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = mock_txs
-        mock_client.get.return_value = mock_response
-        mock_client_getter.return_value = mock_client
+    with patch("src.opportunity.vol_velocity.settings.helius_api_key", "test_mock_api_key"):
+        with patch.object(engine, "_get_client") as mock_client_getter:
+            mock_client = AsyncMock()
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = mock_txs
+            mock_client.get.return_value = mock_response
+            mock_client_getter.return_value = mock_client
 
-        with patch("time.time", return_value=1000000050):
-            res = await engine.calculate_velocity(mint, window_seconds=300)
+            with patch("time.time", return_value=1000000050):
+                res = await engine.calculate_velocity(mint, window_seconds=300)
 
-            assert res.buy_count == 1
-            assert res.sell_count == 1
-            assert res.net_buy_pressure_ratio == 1.0
+                assert res.buy_count == 1
+                assert res.sell_count == 1
+                assert res.net_buy_pressure_ratio == 1.0
+                assert res.provider_used == "helius"
+
+
+@pytest.mark.asyncio
+async def test_vol_velocity_rpc_signatures_tier():
+    """Verify Tier 3 RPC signatures fallback when Helius and DexScreener are both unavailable."""
+    engine = VolumeVelocityEngine()
+
+    mock_signatures = [
+        {"signature": f"sig_{i}", "blockTime": 1000000000 + i * 10}
+        for i in range(10)
+    ]
+
+    with patch("src.opportunity.vol_velocity.settings.helius_api_key", None):
+        with patch.object(engine, "_fetch_from_dexscreener", AsyncMock(return_value=None)):
+            with patch("src.opportunity.vol_velocity.solana_rpc.get_signatures_for_address", AsyncMock(return_value=mock_signatures)):
+                with patch("time.time", return_value=1000000050):
+                    res = await engine.calculate_velocity("MINT_RPC_TEST", initial_buy_sol=1.5, window_seconds=300)
+
+                    assert res.is_successful is True
+                    assert res.provider_used == "solana_rpc"
+                    assert res.buy_count >= 1
+                    assert res.buy_volume_sol == 1.5
+                    assert res.score > 0.0
 
 
 @pytest.mark.asyncio

@@ -35,6 +35,10 @@ class DisjointSet:
         self.rank = {el: 0 for el in elements}
 
     def find(self, i: str) -> str:
+        if i not in self.parent:
+            self.parent[i] = i
+            self.rank[i] = 0
+            return i
         if self.parent[i] == i:
             return i
         self.parent[i] = self.find(self.parent[i])
@@ -205,14 +209,33 @@ class FundingGraphTracer:
         return node
 
     async def trace_wallets_batch(self, wallet_holdings: dict[str, float], total_supply: float) -> list[FundingTraceNode]:
-        """Traces a batch of wallets concurrently."""
+        """Traces a batch of wallets concurrently with timeout and exception safety."""
         tasks = []
         for wallet, amount in wallet_holdings.items():
             pct = (amount / total_supply * 100.0) if total_supply > 0 else 0.0
             tasks.append(self.trace_wallet_node(wallet, amount, pct))
 
-        results = await asyncio.gather(*tasks, return_exceptions=False)
-        return list(results)
+        if not tasks:
+            return []
+
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=45.0
+            )
+            valid_nodes = []
+            for res in results:
+                if isinstance(res, FundingTraceNode):
+                    valid_nodes.append(res)
+                elif isinstance(res, Exception):
+                    logger.debug(f"Wallet trace error in batch: {res}")
+            return valid_nodes
+        except asyncio.TimeoutError:
+            logger.warning("Bundling wallet trace batch timed out after 45s, proceeding with partial/empty trace.")
+            return []
+        except Exception as e:
+            logger.warning(f"Unexpected error in trace_wallets_batch: {e}")
+            return []
 
     def analyze_clusters(
         self,
@@ -287,19 +310,20 @@ class FundingGraphTracer:
                     rel_type = "SHARED_FUNDER_HOP2"
                     hop_dist = 2
                     shared_funder = n1.hop2.funder_address
-                    confidence = 0.80
+                    confidence = 0.65  # Conservative confidence for 2-hop relation
 
                 if matched and rel_type:
                     dset.union(w1, w2)
+                    shared_sol_total = (
+                        (n1.hop1.amount_sol if n1.hop1 else 0.0) +
+                        (n2.hop1.amount_sol if n2.hop1 else 0.0)
+                    )
                     relationships.append({
                         "wallet_a": w1,
                         "wallet_b": w2,
                         "relationship_type": rel_type,
                         "hop_distance": hop_dist,
-                        "shared_funding_sol": max(
-                            n1.hop1.amount_sol if n1.hop1 else 0.0,
-                            n2.hop1.amount_sol if n2.hop1 else 0.0
-                        ),
+                        "shared_funding_sol": shared_sol_total,
                         "confidence_score": confidence,
                         "shared_funder": shared_funder
                     })
@@ -314,20 +338,29 @@ class FundingGraphTracer:
         max_cluster_supply_pct = 0.0
 
         for root, members in clusters_map.items():
-            # Only count as cluster if >= 2 wallets or single wallet holding significant supply
             total_supply_pct = sum(m.token_holding_pct for m in members)
             total_tokens = sum(m.token_holding_amount for m in members)
+            cluster_wallets = [m.wallet_address for m in members]
 
+            # Check if this cluster has strong evidence (DIRECT_FUNDING or SHARED_FUNDER_HOP1)
+            has_strong_evidence = any(
+                r["relationship_type"] in ("DIRECT_FUNDING", "SHARED_FUNDER_HOP1") and
+                (r["wallet_a"] in cluster_wallets or r["wallet_b"] in cluster_wallets)
+                for r in relationships
+            )
+
+            # Only count towards hard rejection threshold if cluster has strong (Hop-1 / Direct) evidence
             if len(members) >= 2 or total_supply_pct >= 5.0:
-                if len(members) >= 2 and total_supply_pct > max_cluster_supply_pct:
+                if len(members) >= 2 and has_strong_evidence and total_supply_pct > max_cluster_supply_pct:
                     max_cluster_supply_pct = total_supply_pct
 
                 clusters_result.append({
                     "root": root,
                     "wallets_count": len(members),
-                    "wallets": [m.wallet_address for m in members],
+                    "wallets": cluster_wallets,
                     "total_supply_pct": total_supply_pct,
-                    "total_tokens": total_tokens
+                    "total_tokens": total_tokens,
+                    "has_hop1_evidence": has_strong_evidence
                 })
 
         return clusters_result, max_cluster_supply_pct, relationships

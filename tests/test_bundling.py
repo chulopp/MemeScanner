@@ -93,3 +93,65 @@ async def test_pipeline_integration_with_bundling_filter():
             assert result.filter_pass is False
             assert "Bundle Monopoly Risk" in (result.rejection_reason or "")
             assert result.sniper_bundle_pct == 35.0
+
+
+@pytest.mark.asyncio
+async def test_extract_early_buyers_resolves_ata_to_owner():
+    """Verify that ATAs returned by getTokenLargestAccounts are resolved to their owner wallets."""
+    engine = BundlingEngine()
+
+    mock_largest = [
+        {"address": "ATA_ACCOUNT_1", "uiAmount": 100_000.0},
+        {"address": "ATA_ACCOUNT_2", "uiAmount": 200_000.0}
+    ]
+
+    async def mock_get_owner(ata):
+        if ata == "ATA_ACCOUNT_1":
+            return "OWNER_WALLET_1"
+        elif ata == "ATA_ACCOUNT_2":
+            return "OWNER_WALLET_2"
+        return None
+
+    with patch("src.filters.bundling.solana_rpc.get_token_largest_accounts", AsyncMock(return_value=mock_largest)):
+        with patch("src.filters.bundling.solana_rpc.get_token_account_owner", AsyncMock(side_effect=mock_get_owner)):
+            holdings = await engine.extract_early_buyers_and_top_holders(
+                mint_address="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                total_supply=1_000_000_000.0
+            )
+
+            assert "OWNER_WALLET_1" in holdings
+            assert holdings["OWNER_WALLET_1"] == 100_000.0
+            assert "OWNER_WALLET_2" in holdings
+            assert holdings["OWNER_WALLET_2"] == 200_000.0
+            assert "ATA_ACCOUNT_1" not in holdings
+
+
+@pytest.mark.asyncio
+async def test_total_supply_zero_no_crash():
+    """Verify that total_supply=0 is gracefully guarded and does not raise ZeroDivisionError."""
+    engine = BundlingEngine()
+
+    with patch.object(engine, "extract_early_buyers_and_top_holders", AsyncMock(return_value={})):
+        res = await engine.evaluate_token_bundling(
+            mint_address="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            total_supply=0.0
+        )
+        assert res.sniper_bundle_pct == 0.0
+        assert res.is_bundle_risk is False
+
+
+@pytest.mark.asyncio
+async def test_deployer_fallback_uses_initial_buy():
+    """Verify that deployer holding uses actual initial buy amount instead of fabricated 1%."""
+    engine = BundlingEngine()
+
+    with patch("src.filters.bundling.solana_rpc.get_token_largest_accounts", AsyncMock(return_value=[])):
+        holdings = await engine.extract_early_buyers_and_top_holders(
+            mint_address="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            total_supply=1_000_000_000.0,
+            deployer_address="DEPLOYER_WALLET_XYZ",
+            deployer_initial_buy=45_000_000.0
+        )
+
+        assert "DEPLOYER_WALLET_XYZ" in holdings
+        assert holdings["DEPLOYER_WALLET_XYZ"] == 45_000_000.0

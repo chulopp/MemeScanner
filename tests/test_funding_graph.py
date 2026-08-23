@@ -138,3 +138,72 @@ def test_direct_funding_relationship():
     assert len(relationships) == 1
     assert relationships[0]["relationship_type"] == "DIRECT_FUNDING"
     assert max_supply_pct == 26.0  # 12% + 14%
+
+
+def test_disjoint_set_unknown_key_no_crash():
+    """Verify that DisjointSet.find auto-registers unknown keys without KeyError."""
+    dset = DisjointSet(["W1", "W2"])
+    # W_UNKNOWN was not initialized in elements list
+    root = dset.find("W_UNKNOWN")
+    assert root == "W_UNKNOWN"
+
+    dset.union("W1", "W_UNKNOWN")
+    assert dset.find("W1") == dset.find("W_UNKNOWN")
+
+
+def test_hop2_alone_does_not_trigger_rejection_supply():
+    """
+    Verify that a cluster formed purely via Hop-2 grandfunder (without Hop-1/Direct)
+    does NOT contribute to max_supply_pct for hard rejection, but is saved in clusters.
+    """
+    tracer = FundingGraphTracer()
+    grandfunder = "GrandParentFunder1111111111111111111111111"
+
+    node1 = FundingTraceNode(
+        wallet_address="WalletA111111111111111111111111111111111111",
+        token_holding_pct=20.0,
+        hop1=FundingHopInfo(funder_address="MidFunderA", is_known_cex=False),
+        hop2=FundingHopInfo(funder_address=grandfunder, is_known_cex=False)
+    )
+
+    node2 = FundingTraceNode(
+        wallet_address="WalletB222222222222222222222222222222222222",
+        token_holding_pct=20.0,
+        hop1=FundingHopInfo(funder_address="MidFunderB", is_known_cex=False),
+        hop2=FundingHopInfo(funder_address=grandfunder, is_known_cex=False)
+    )
+
+    clusters, max_supply_pct, relationships = tracer.analyze_clusters([node1, node2])
+
+    assert len(relationships) == 1
+    assert relationships[0]["relationship_type"] == "SHARED_FUNDER_HOP2"
+    assert relationships[0]["confidence_score"] == 0.65
+    # Max supply pct for rejection must be 0.0 because it lacks Hop-1/Direct strong evidence
+    assert max_supply_pct == 0.0
+    # But cluster is still recorded with has_hop1_evidence == False
+    assert len(clusters) == 1
+    assert clusters[0]["has_hop1_evidence"] is False
+    assert clusters[0]["total_supply_pct"] == 40.0
+
+
+@pytest.mark.asyncio
+async def test_trace_wallets_batch_exception_handling():
+    """Verify that exceptions in individual wallet traces are filtered out without crashing."""
+    tracer = FundingGraphTracer()
+
+    async def mock_trace(wallet, amount, pct):
+        if "error" in wallet:
+            raise RuntimeError("RPC Connection Dropped")
+        return FundingTraceNode(wallet_address=wallet, token_holding_pct=pct)
+
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(tracer, "trace_wallet_node", mock_trace)
+        results = await tracer.trace_wallets_batch(
+            {"good_wallet_1": 100.0, "error_wallet": 50.0, "good_wallet_2": 200.0},
+            total_supply=1000.0
+        )
+        assert len(results) == 2
+        addresses = [r.wallet_address for r in results]
+        assert "good_wallet_1" in addresses
+        assert "good_wallet_2" in addresses
+        assert "error_wallet" not in addresses

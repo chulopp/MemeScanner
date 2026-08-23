@@ -20,6 +20,7 @@ from src.ingestion.manager import IngestionManager
 from src.ingestion.schemas import RawTokenEvent
 from src.filters.pipeline import filter_pipeline
 from src.filters.schemas import SafetyCheckResult
+from src.filters.funding_graph import funding_tracer
 from src.utils.logger import logger, console, print_token_table, mask_url
 from src.utils.solana_rpc import solana_rpc
 
@@ -80,6 +81,7 @@ class MemeScannerApp:
         logger.info("Shutting down MemeScanner...")
         self._shutdown_event.set()
         await self.ingestion_manager.stop()
+        await funding_tracer.close()
         await solana_rpc.close()
 
         # Print summary table if any tokens were processed

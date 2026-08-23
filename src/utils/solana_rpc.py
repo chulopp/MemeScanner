@@ -58,6 +58,19 @@ class SolanaRpcClient:
         )
         return res.get("value") if res else None
 
+    async def get_token_account_owner(self, ata_address: str) -> Optional[str]:
+        """
+        Resolves the owner wallet address from an SPL Token Account (ATA).
+        Returns the owner wallet pubkey string if found, otherwise None.
+        """
+        acc_info = await self.get_account_info(ata_address)
+        if not acc_info:
+            return None
+        parsed = acc_info.get("data", {}).get("parsed", {})
+        info = parsed.get("info", {})
+        owner = info.get("owner")
+        return str(owner) if owner else None
+
     async def get_mint_info(self, mint_address: str) -> dict:
         """
         Parses SPL Token Mint data.

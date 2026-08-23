@@ -27,39 +27,50 @@ class BundlingEngine:
         self,
         mint_address: str,
         total_supply: float,
-        deployer_address: Optional[str] = None
+        deployer_address: Optional[str] = None,
+        deployer_initial_buy: float = 0.0
     ) -> dict[str, float]:
         """
         Extracts candidate early buyers & top holders:
         1. Top largest token accounts via getTokenLargestAccounts
-        2. First transactions signers via getSignaturesForAddress
-        3. Deployer address (if provided)
+        2. Resolves each ATA to owner wallet address
+        3. Adds deployer address if provided (with actual initial buy or 0.0)
         """
         wallet_holdings: dict[str, float] = {}
 
-        # 1. Fetch Top 5-10 largest token accounts
+        # 1. Fetch Top 8 largest token accounts
         try:
             largest_accounts = await solana_rpc.get_token_largest_accounts(mint_address)
-            for acc in largest_accounts[:8]:
+            candidate_atas = largest_accounts[:8]
+
+            # Resolve ATA -> owner wallet concurrently
+            resolve_tasks = []
+            amounts = []
+            raw_addrs = []
+            for acc in candidate_atas:
                 addr = acc.get("address")
+                if not addr:
+                    continue
                 ui_amount = acc.get("uiAmount")
                 amount_str = acc.get("amount", "0")
                 amount = float(ui_amount) if ui_amount is not None else float(amount_str)
 
-                # For token accounts, get parsed owner if needed or use address
-                if addr:
-                    wallet_holdings[addr] = amount
+                raw_addrs.append(addr)
+                amounts.append(amount)
+                resolve_tasks.append(solana_rpc.get_token_account_owner(addr))
+
+            if resolve_tasks:
+                owners = await asyncio.gather(*resolve_tasks, return_exceptions=True)
+                for raw_addr, amount, owner_res in zip(raw_addrs, amounts, owners):
+                    owner = owner_res if isinstance(owner_res, str) and owner_res else raw_addr
+                    # Aggregate holding if multiple ATAs resolve to same owner
+                    wallet_holdings[owner] = wallet_holdings.get(owner, 0.0) + amount
         except Exception as e:
-            logger.debug(f"Error fetching largest accounts for {mint_address[:8]}: {e}")
+            logger.debug(f"Error fetching/resolving largest accounts for {mint_address[:8]}: {e}")
 
-        # 2. Add deployer if known
+        # 2. Add deployer if known and not already in wallet_holdings
         if deployer_address and deployer_address not in wallet_holdings:
-            # Estimate dev allocation if not in top accounts (default small baseline)
-            wallet_holdings[deployer_address] = total_supply * 0.01
-
-        # If no holders found, return fallback
-        if not wallet_holdings and deployer_address:
-            wallet_holdings[deployer_address] = total_supply * 0.05
+            wallet_holdings[deployer_address] = deployer_initial_buy
 
         return wallet_holdings
 
@@ -67,16 +78,21 @@ class BundlingEngine:
         self,
         mint_address: str,
         total_supply: float = 1_000_000_000.0,
-        deployer_address: Optional[str] = None
+        deployer_address: Optional[str] = None,
+        deployer_initial_buy: float = 0.0
     ) -> BundlingResult:
         """
         Evaluates a token for Block-0 bundling and 2-Hop Sybil clusters.
         """
+        # Guard against 0 or negative total_supply
+        total_supply = max(total_supply, 1.0)
+
         # Step 1: Extract candidate wallets and their holdings
         wallet_holdings = await self.extract_early_buyers_and_top_holders(
             mint_address=mint_address,
             total_supply=total_supply,
-            deployer_address=deployer_address
+            deployer_address=deployer_address,
+            deployer_initial_buy=deployer_initial_buy
         )
 
         if not wallet_holdings:

@@ -36,7 +36,8 @@ class FilterPipeline:
             bundling_res: BundlingResult = await bundling_engine.evaluate_token_bundling(
                 mint_address=event.token_address,
                 total_supply=event.total_supply,
-                deployer_address=event.deployer_wallet_address
+                deployer_address=event.deployer_wallet_address,
+                deployer_initial_buy=event.initial_buy_amount
             )
 
             result.sniper_bundle_pct = bundling_res.sniper_bundle_pct

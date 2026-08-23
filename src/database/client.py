@@ -333,5 +333,101 @@ class DatabaseManager:
                 return [w for w in self._in_memory_smart_money.values() if w.get("is_active", True)]
             return list(self._in_memory_smart_money.values())
 
+    # ------------------------------------------------------------------ #
+    # Generic CRUD helpers (used by backtest modules)                      #
+    # ------------------------------------------------------------------ #
+
+    async def query(
+        self,
+        table: str,
+        filters: Optional[dict[str, str]] = None,
+        select: str = "*",
+        limit: int = 1000
+    ) -> list[dict]:
+        """
+        Generic query — fetches rows from any Supabase table.
+        `filters` is a dict of {column: "operator.value"} e.g. {"label": "not.is.null"}.
+        Falls back to empty list on error or no connection.
+        """
+        if self._connected and self._client:
+            try:
+                loop = asyncio.get_running_loop()
+
+                def _run():
+                    q = self._client.table(table).select(select).limit(limit)
+                    if filters:
+                        for col, val in filters.items():
+                            if val.startswith("not.is.null"):
+                                q = q.not_.is_(col, "null")
+                            elif val.startswith("is.null"):
+                                q = q.is_(col, "null")
+                            elif val.startswith("eq."):
+                                q = q.eq(col, val[3:])
+                            elif val.startswith("not."):
+                                q = q.neq(col, val[4:])
+                            elif val.startswith("gte."):
+                                q = q.gte(col, val[4:])
+                            elif val.startswith("lte."):
+                                q = q.lte(col, val[4:])
+                    return q.execute()
+
+                response = await loop.run_in_executor(None, _run)
+                return response.data or []
+            except Exception as e:
+                logger.debug(f"Supabase generic query error on '{table}': {e}")
+        return []
+
+    async def insert(self, table: str, row: dict) -> bool:
+        """Generic insert for any table. Returns True on success."""
+        if self._connected and self._client:
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None,
+                    lambda: self._client.table(table).insert(row).execute()
+                )
+                return True
+            except Exception as e:
+                logger.debug(f"Supabase insert error on '{table}': {e}")
+        return False
+
+    async def upsert(self, table: str, row: dict, on_conflict: str = "id") -> bool:
+        """Generic upsert for any table."""
+        if self._connected and self._client:
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None,
+                    lambda: self._client.table(table).upsert(row, on_conflict=on_conflict).execute()
+                )
+                return True
+            except Exception as e:
+                logger.debug(f"Supabase upsert error on '{table}': {e}")
+        return False
+
+    async def update(self, table: str, updates: dict, filters: dict) -> bool:
+        """Generic update for any table. filters: {column: 'eq.value'}."""
+        if self._connected and self._client:
+            try:
+                loop = asyncio.get_running_loop()
+
+                def _run():
+                    q = self._client.table(table).update(updates)
+                    for col, val in filters.items():
+                        if val.startswith("eq."):
+                            q = q.eq(col, val[3:])
+                    return q.execute()
+
+                await loop.run_in_executor(None, _run)
+                return True
+            except Exception as e:
+                logger.debug(f"Supabase update error on '{table}': {e}")
+        return False
+
+    async def initialize(self) -> None:
+        """Alias to ensure DB is connected (for CLI entry points)."""
+        if not self._connected:
+            self.connect()
+
 
 db_manager = DatabaseManager()

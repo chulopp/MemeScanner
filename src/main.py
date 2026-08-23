@@ -47,6 +47,7 @@ class MemeScannerApp:
             "token_address": event.token_address,
             "launch_venue": event.launch_venue,
             "status": "PASSED_SAFETY" if result.filter_pass else "REJECTED",
+            "opportunity_score": result.opportunity_score,
             "dev_holding_pct": result.dev_holding_pct,
             "sniper_bundle_pct": result.sniper_bundle_pct,
             "lp_lock_pct": result.lp_lock_pct,
@@ -56,7 +57,7 @@ class MemeScannerApp:
 
     async def run(self):
         console.print("\n[bold cyan]========================================================[/bold cyan]")
-        console.print("[bold yellow]Solana Meme Coin Safety & Signal Bot (Fase 0, 1 & 2)[/bold yellow]")
+        console.print("[bold yellow]Solana Meme Coin Safety & Signal Bot (Fase 0, 1, 2 & 3)[/bold yellow]")
         console.print(f"[dim]Helius RPC: {mask_url(settings.helius_rpc_url)}[/dim]")
         console.print(f"[dim]PumpPortal WS: {settings.pumpportal_ws_url}[/dim]")
         console.print("[bold cyan]========================================================[/bold cyan]\n")

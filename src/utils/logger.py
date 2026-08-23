@@ -34,12 +34,13 @@ def mask_url(url: str) -> str:
 
 def print_token_table(tokens_data: list[dict]):
     """Print formatted summary table of processed tokens."""
-    table = Table(title="[Solana Meme Coin Safety Filter Results]", show_lines=True)
+    table = Table(title="[Solana Meme Coin Scanner: Safety & Opportunity Results]", show_lines=True)
 
     table.add_column("Symbol", style="cyan", no_wrap=True)
     table.add_column("Mint Address", style="magenta")
     table.add_column("Venue", style="yellow")
     table.add_column("Status", style="bold")
+    table.add_column("Opp Score", justify="center", style="bold yellow")
     table.add_column("Dev Buy %", justify="right")
     table.add_column("Bundle %", justify="right", style="bold magenta")
     table.add_column("LP Lock %", justify="right")
@@ -55,11 +56,15 @@ def print_token_table(tokens_data: list[dict]):
         else:
             status_formatted = f"[yellow]{status}[/yellow]"
 
+        opp_score = t.get("opportunity_score")
+        opp_formatted = f"{opp_score:.1f}" if opp_score is not None else "-"
+
         table.add_row(
             t.get("symbol", "N/A"),
             t.get("token_address", "")[:12] + "...",
             t.get("launch_venue", ""),
             status_formatted,
+            opp_formatted,
             f"{t.get('dev_holding_pct', 0.0):.1f}%",
             f"{t.get('sniper_bundle_pct', 0.0):.1f}%",
             f"{t.get('lp_lock_pct', 0.0):.1f}%",

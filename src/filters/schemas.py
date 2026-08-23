@@ -27,4 +27,8 @@ class SafetyCheckResult(BaseModel):
     scalp_flag_low_balance: bool = False
     scalp_flag_pump_anomaly: bool = False
 
+    # Fase 3: Multi-Factor Opportunity Scoring
+    opportunity_score: Optional[float] = None
+    opportunity_breakdown: dict[str, Any] = Field(default_factory=dict)
+
     raw_check_data: dict[str, Any] = Field(default_factory=dict)

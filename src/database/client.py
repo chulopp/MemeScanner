@@ -2,7 +2,14 @@ import asyncio
 from typing import Optional, Any
 from supabase import create_client, Client
 from src.config import settings
-from src.database.models import TokenModel, FilterResultModel, WalletModel, WalletRelationshipModel
+from src.database.models import (
+    TokenModel,
+    FilterResultModel,
+    WalletModel,
+    WalletRelationshipModel,
+    MetricSnapshotModel,
+    SmartMoneyProfileModel
+)
 from src.utils.logger import logger
 
 
@@ -15,6 +22,8 @@ class DatabaseManager:
         self._in_memory_tokens: dict[str, dict] = {}
         self._in_memory_filters: dict[str, dict] = {}
         self._in_memory_wallets: dict[str, dict] = {}
+        self._in_memory_snapshots: list[dict] = []
+        self._in_memory_smart_money: dict[str, dict] = {}
         self._lock = asyncio.Lock()
 
     def connect(self):
@@ -190,6 +199,139 @@ class DatabaseManager:
                 logger.warning(f"Supabase batch insert wallet_relationships error: {e}")
 
         return True
+
+    async def insert_metric_snapshot(self, snapshot: MetricSnapshotModel) -> bool:
+        """Insert an opportunity metric snapshot into Supabase/in-memory."""
+        data = {
+            "token_address": snapshot.token_address,
+            "snapshot_at": snapshot.snapshot_at.isoformat(),
+            "opportunity_score": snapshot.opportunity_score,
+            "score_vol_velocity": snapshot.score_vol_velocity,
+            "score_smart_money": snapshot.score_smart_money,
+            "score_global_fee": snapshot.score_global_fee,
+            "score_holder_curve": snapshot.score_holder_curve,
+            "score_social_meta": snapshot.score_social_meta,
+            "market_cap_usd": snapshot.market_cap_usd,
+            "liquidity_usd": snapshot.liquidity_usd,
+            "volume_5m_usd": snapshot.volume_5m_usd,
+            "buy_tx_count_5m": snapshot.buy_tx_count_5m,
+            "sell_tx_count_5m": snapshot.sell_tx_count_5m,
+            "net_buy_pressure_ratio": snapshot.net_buy_pressure_ratio,
+            "global_priority_fees_sol": snapshot.global_priority_fees_sol,
+            "bonding_curve_pct": snapshot.bonding_curve_pct,
+            "unique_holders_count": snapshot.unique_holders_count,
+            "weights_used": snapshot.weights_used,
+            "active_components": snapshot.active_components,
+            "raw_metrics": snapshot.raw_metrics
+        }
+
+        if self._connected and self._client:
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None,
+                    lambda: self._client.table("metric_snapshots").insert(data).execute()
+                )
+                return True
+            except Exception as e:
+                logger.warning(f"Supabase insert metric_snapshot error: {e}")
+
+        async with self._lock:
+            self._in_memory_snapshots.append(data)
+            return True
+
+    async def upsert_smart_money_wallet(self, profile: SmartMoneyProfileModel) -> bool:
+        """Upsert a smart money profile."""
+        data = {
+            "wallet_address": profile.wallet_address,
+            "tier": profile.tier,
+            "is_active": profile.is_active,
+            "first_added": profile.first_added.isoformat(),
+            "last_active_at": profile.last_active_at.isoformat(),
+            "total_trades_recorded": profile.total_trades_recorded,
+            "total_volume_sol": profile.total_volume_sol,
+            "net_realized_profit_sol": profile.net_realized_profit_sol,
+            "win_rate_pct": profile.win_rate_pct,
+            "profit_factor": profile.profit_factor,
+            "source": profile.source,
+            "notes": profile.notes
+        }
+
+        if self._connected and self._client:
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None,
+                    lambda: self._client.table("smart_money_profiles").upsert(data).execute()
+                )
+                return True
+            except Exception as e:
+                logger.warning(f"Supabase upsert smart_money_profiles error: {e}")
+
+        async with self._lock:
+            self._in_memory_smart_money[profile.wallet_address] = data
+            return True
+
+    async def batch_upsert_smart_money_wallets(self, profiles: list[SmartMoneyProfileModel]) -> bool:
+        """Batch upsert multiple smart money profiles."""
+        if not profiles:
+            return True
+
+        rows = [
+            {
+                "wallet_address": p.wallet_address,
+                "tier": p.tier,
+                "is_active": p.is_active,
+                "first_added": p.first_added.isoformat(),
+                "last_active_at": p.last_active_at.isoformat(),
+                "total_trades_recorded": p.total_trades_recorded,
+                "total_volume_sol": p.total_volume_sol,
+                "net_realized_profit_sol": p.net_realized_profit_sol,
+                "win_rate_pct": p.win_rate_pct,
+                "profit_factor": p.profit_factor,
+                "source": p.source,
+                "notes": p.notes
+            }
+            for p in profiles
+        ]
+
+        if self._connected and self._client:
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None,
+                    lambda: self._client.table("smart_money_profiles").upsert(rows).execute()
+                )
+                return True
+            except Exception as e:
+                logger.warning(f"Supabase batch upsert smart_money_profiles error: {e}")
+
+        async with self._lock:
+            for r in rows:
+                self._in_memory_smart_money[r["wallet_address"]] = r
+            return True
+
+    async def get_smart_money_wallets(self, active_only: bool = True) -> list[dict]:
+        """Fetch list of smart money wallets from Supabase / in-memory."""
+        if self._connected and self._client:
+            try:
+                loop = asyncio.get_running_loop()
+                query = self._client.table("smart_money_profiles").select("*")
+                if active_only:
+                    query = query.eq("is_active", True)
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: query.execute()
+                )
+                if response.data:
+                    return response.data
+            except Exception as e:
+                logger.debug(f"Supabase get_smart_money_wallets error: {e}")
+
+        async with self._lock:
+            if active_only:
+                return [w for w in self._in_memory_smart_money.values() if w.get("is_active", True)]
+            return list(self._in_memory_smart_money.values())
 
 
 db_manager = DatabaseManager()

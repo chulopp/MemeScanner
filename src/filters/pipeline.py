@@ -5,6 +5,7 @@ from src.filters.schemas import SafetyCheckResult
 from src.filters.pump_safety import pump_safety_filter
 from src.filters.raydium_safety import raydium_safety_filter
 from src.filters.bundling import bundling_engine, BundlingResult
+from src.opportunity.scorer import opportunity_scorer, OpportunityScoreResult
 from src.database.client import db_manager
 from src.database.models import FilterResultModel, WalletRelationshipModel
 from src.utils.logger import logger
@@ -31,6 +32,7 @@ class FilterPipeline:
 
         # --- Phase 2: Bundling & 2-Hop Funding Graph Engine ---
         # Run bundling & funding graph analysis if passed preliminary safety
+        candidate_wallets: list[str] = []
         if result.filter_pass:
             logger.info(f"🕸️ Running Bundling & 2-Hop Graph Analysis on {event.symbol} ({event.token_address[:8]}...)...")
             bundling_res: BundlingResult = await bundling_engine.evaluate_token_bundling(
@@ -42,6 +44,10 @@ class FilterPipeline:
 
             result.sniper_bundle_pct = bundling_res.sniper_bundle_pct
             result.raw_check_data["bundling_details"] = bundling_res.raw_cluster_data
+
+            if bundling_res.clusters:
+                for c in bundling_res.clusters:
+                    candidate_wallets.extend(c.get("wallets", []))
 
             # Persist detected wallet relationships
             if bundling_res.relationships:
@@ -70,6 +76,21 @@ class FilterPipeline:
                     if result.rejection_reason else bundle_reason
                 )
 
+        # --- Phase 3: Multi-Factor Opportunity Scoring & Snapshot ---
+        if result.filter_pass:
+            logger.info(f"📊 Evaluating Multi-Factor Opportunity Score for {event.symbol} ({event.token_address[:8]}...)...")
+            score_res: OpportunityScoreResult = await opportunity_scorer.score_token(
+                event=event,
+                candidate_wallets=list(set(candidate_wallets))
+            )
+
+            result.opportunity_score = score_res.opportunity_score
+            result.opportunity_breakdown = score_res.breakdown
+            result.raw_check_data["opportunity_breakdown"] = score_res.breakdown
+            result.raw_check_data["weights_used"] = score_res.weights_used
+
+            if score_res.metric_snapshot:
+                await db_manager.insert_metric_snapshot(score_res.metric_snapshot)
 
         # 1. Update Token status in Database
         new_status = "PASSED_SAFETY" if result.filter_pass else "REJECTED"
@@ -96,9 +117,10 @@ class FilterPipeline:
 
         # 3. Log outcome visually
         if result.filter_pass:
+            opp_display = f" | [bold yellow]Opp Score: {result.opportunity_score:.1f}/100[/bold yellow]" if result.opportunity_score is not None else ""
             logger.info(
                 f"✅ [bold green]PASSED SAFETY[/bold green]: {event.symbol} | "
-                f"Dev Buy: {result.dev_holding_pct:.1f}% | Top10: {result.top10_holder_pct:.1f}% | Venue: {event.launch_venue}"
+                f"Dev Buy: {result.dev_holding_pct:.1f}% | Top10: {result.top10_holder_pct:.1f}% | Venue: {event.launch_venue}{opp_display}"
             )
         else:
             logger.warning(
@@ -106,7 +128,7 @@ class FilterPipeline:
                 f"Reason: {result.rejection_reason}"
             )
 
-        # 4. Forward to downstream callback (e.g. Opportunity Layer / Telegram Bot)
+        # 4. Forward to downstream callback (e.g. Paper Trading / Telegram Bot)
         if self.on_result_callback:
             try:
                 await self.on_result_callback(result, event)

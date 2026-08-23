@@ -49,3 +49,45 @@ class WalletRelationshipModel(BaseModel):
     shared_funding_sol: float = 0.0
     confidence_score: float = 0.0
 
+
+class MetricSnapshotModel(BaseModel):
+    token_address: str
+    snapshot_at: datetime = Field(default_factory=datetime.utcnow)
+    opportunity_score: float = 0.0
+    score_vol_velocity: Optional[float] = None
+    score_smart_money: Optional[float] = None
+    score_global_fee: Optional[float] = None
+    score_holder_curve: Optional[float] = None
+    score_social_meta: Optional[float] = None
+    market_cap_usd: float = 0.0
+    liquidity_usd: float = 0.0
+    volume_5m_usd: float = 0.0
+    buy_tx_count_5m: int = 0
+    sell_tx_count_5m: int = 0
+    net_buy_pressure_ratio: float = 0.0
+    global_priority_fees_sol: float = 0.0
+    bonding_curve_pct: float = 0.0
+    unique_holders_count: int = 0
+    weights_used: dict[str, float] = Field(default_factory=dict)
+    active_components: list[str] = Field(default_factory=list)
+    raw_metrics: dict[str, Any] = Field(default_factory=dict)
+
+
+class SmartMoneyProfileModel(BaseModel):
+    wallet_address: str
+    tier: str = "SEED"  # 'SEED' | 'ACTIVE' | 'DEMOTED'
+    is_active: bool = True
+    first_added: datetime = Field(default_factory=datetime.utcnow)
+    last_active_at: datetime = Field(default_factory=datetime.utcnow)
+    total_trades_recorded: int = 0
+    total_volume_sol: float = 0.0
+    net_realized_profit_sol: float = 0.0
+    win_rate_pct: float = 0.0
+    profit_factor: float = 0.0
+    source: str = "MANUAL"  # 'MANUAL' | 'AUTO_PROMOTED'
+    notes: str = ""
+
+
+# Convenient alias
+SmartMoneyWalletModel = SmartMoneyProfileModel
+

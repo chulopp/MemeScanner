@@ -61,10 +61,66 @@ async def _cmd_evaluate(window: str) -> None:
     await evaluate_paper_trading(window=window)
 
 
+async def _cmd_portfolio(balance: float, risk_pct: float, source: str) -> None:
+    """Run Virtual Portfolio & Multi-Exit Simulation."""
+    from src.paper_trading.portfolio_simulator import portfolio_simulator
+    await db_manager.initialize()
+
+    signals: list[dict] = []
+    if source == "backtest":
+        signals = await db_manager.query("backtest_tokens", limit=1000)
+    else:
+        # Default to paper signals
+        paper_sigs = await db_manager.query("paper_signals", limit=1000)
+        outcomes = await db_manager.query("signal_outcomes", limit=5000)
+        
+        # Merge outcomes into signals
+        outcomes_by_sig = {}
+        for o in outcomes:
+            sid = o.get("signal_id")
+            if sid not in outcomes_by_sig:
+                outcomes_by_sig[sid] = {}
+            w = o.get("time_window")
+            outcomes_by_sig[sid][f"return_{w}"] = o.get("return_pct", 0.0)
+            outcomes_by_sig[sid][f"peak_{w}"] = o.get("ath_return_pct", 0.0)
+            outcomes_by_sig[sid]["ath_return_pct"] = max(outcomes_by_sig[sid].get("ath_return_pct", 0.0), o.get("ath_return_pct", 0.0))
+            outcomes_by_sig[sid]["mae_pct"] = min(outcomes_by_sig[sid].get("mae_pct", 0.0), o.get("mae_pct", 0.0))
+            outcomes_by_sig[sid]["status"] = o.get("status")
+
+        for s in paper_sigs:
+            if s.get("is_baseline"):
+                continue
+            sig_copy = dict(s)
+            sig_id = s.get("id")
+            if sig_id in outcomes_by_sig:
+                sig_copy.update(outcomes_by_sig[sig_id])
+            signals.append(sig_copy)
+
+    if not signals:
+        print(f"\nℹ️  No data found in '{source}'.")
+        print("   If testing, collect data first or run backtest.")
+        return
+
+    milestones = portfolio_simulator.calculate_milestones(signals)
+    matrix_results = portfolio_simulator.run_matrix_simulation(
+        signals=signals,
+        initial_balance=balance,
+        position_risk_pct=risk_pct
+    )
+
+    report_str = portfolio_simulator.render_cli_report(
+        matrix_results=matrix_results,
+        milestones=milestones,
+        initial_balance=balance,
+        position_risk_pct=risk_pct
+    )
+    print("\n" + report_str + "\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="python -m src.paper_trading",
-        description="MemeScanner Fase 5 — Paper Trading CLI"
+        description="MemeScanner Fase 5 & 6 — Paper Trading & Portfolio Simulator CLI"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -76,13 +132,23 @@ def main() -> None:
     p_eval.add_argument("--window", type=str, default="24h", choices=["5m", "15m", "1h", "4h", "24h"],
                         help="Outcome window to evaluate (default: 24h)")
 
+    # portfolio
+    p_port = subparsers.add_parser("portfolio", help="Run Virtual Portfolio & Multi-Exit Strategy Simulator")
+    p_port.add_argument("--balance", type=float, default=10.0, help="Initial capital in USD (default: 10.0)")
+    p_port.add_argument("--risk", type=float, default=20.0, help="Position sizing risk % per trade (default: 20.0)")
+    p_port.add_argument("--source", type=str, default="paper", choices=["paper", "backtest"],
+                        help="Data source: 'paper' or 'backtest' (default: paper)")
+
     args = parser.parse_args()
 
     if args.command == "status":
         asyncio.run(_cmd_status())
     elif args.command == "evaluate":
         asyncio.run(_cmd_evaluate(args.window))
+    elif args.command == "portfolio":
+        asyncio.run(_cmd_portfolio(args.balance, args.risk, args.source))
 
 
 if __name__ == "__main__":
     main()
+

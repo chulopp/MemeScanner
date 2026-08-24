@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     # --- Global Fee Urgency & Wash Trade Filter [HIPOTESIS_AWAL] ---
     global_fee_wash_filter_min_fee: int = Field(default=1000, validation_alias="GLOBAL_FEE_WASH_FILTER_MIN_FEE")  # micro-lamports threshold
 
+    # --- Fase 5: Paper Trading & Telegram ---
+    opportunity_threshold: float = Field(default=60.0, validation_alias="OPPORTUNITY_THRESHOLD")  # HYPOTHESIS_INIT
+    telegram_bot_token: str = Field(default="", validation_alias="TELEGRAM_BOT_TOKEN")
+    telegram_chat_id: str = Field(default="", validation_alias="TELEGRAM_CHAT_ID")
+
 
 settings = Settings()
 

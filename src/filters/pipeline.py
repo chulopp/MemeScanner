@@ -136,6 +136,37 @@ class FilterPipeline:
             except Exception as cb_err:
                 logger.error(f"Error in filter result callback: {cb_err}")
 
+        # 5. Paper Trading — Fase 5: Record signal or baseline
+        try:
+            from src.paper_trading.signal_recorder import record_signal
+            from src.paper_trading.outcome_worker import outcome_worker
+            from src.config import settings as app_settings
+            from datetime import datetime, timezone
+
+            if result.filter_pass:
+                signal_id = await record_signal(event, result)
+
+                # Schedule outcome resolution if above threshold
+                if signal_id and result.opportunity_score and result.opportunity_score >= app_settings.opportunity_threshold:
+                    price_snap = None
+                    try:
+                        from src.paper_trading.price_fetcher import fetch_price
+                        price_snap = await fetch_price(event.token_address)
+                    except Exception:
+                        pass
+                    entry_price = price_snap.price_usd if price_snap else 0.0
+                    await outcome_worker.schedule_signal(
+                        signal_id=signal_id,
+                        signal_at=datetime.now(tz=timezone.utc),
+                        entry_price=entry_price,
+                        mint=event.token_address,
+                        symbol=event.symbol or "UNKNOWN"
+                    )
+        except ImportError:
+            pass  # Paper trading module not yet installed
+        except Exception as pt_err:
+            logger.debug(f"Paper trading recording error: {pt_err}")
+
         return result
 
 

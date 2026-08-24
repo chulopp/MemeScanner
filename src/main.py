@@ -28,6 +28,8 @@ from src.database.models import SmartMoneyProfileModel
 from src.utils.price_feed import price_feed
 from src.utils.logger import logger, console, print_token_table, mask_url
 from src.utils.solana_rpc import solana_rpc
+from src.paper_trading.outcome_worker import outcome_worker
+from src.paper_trading import price_fetcher as pt_price_fetcher
 
 
 class MemeScannerApp:
@@ -104,6 +106,13 @@ class MemeScannerApp:
         # Start background periodic smart money evaluator
         self._evaluator_task = asyncio.create_task(self._periodic_smart_money_evaluator())
 
+        # Start Fase 5 outcome worker (APScheduler)
+        try:
+            await outcome_worker.start()
+            logger.info("📡 Fase 5 Paper Trading outcome worker started.")
+        except Exception as ow_err:
+            logger.warning(f"Outcome worker start skipped: {ow_err}")
+
         # Start ingestion listeners
         await self.ingestion_manager.start()
 
@@ -129,6 +138,11 @@ class MemeScannerApp:
         await funding_tracer.close()
         await solana_rpc.close()
         await price_feed.close()
+        try:
+            await outcome_worker.stop()
+            await pt_price_fetcher.close()
+        except Exception:
+            pass
 
         # Print summary table if any tokens were processed
         if self.processed_tokens:

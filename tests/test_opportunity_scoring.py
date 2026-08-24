@@ -7,10 +7,13 @@ from src.database.models import SmartMoneyProfileModel
 from src.opportunity.vol_velocity import VolumeVelocityEngine, VolumeVelocityResult
 from src.opportunity.smart_money import SmartMoneyEngine, SmartMoneyMatchResult
 from src.opportunity.global_fee import GlobalFeeUrgencyEngine, GlobalFeeResult
+from src.opportunity.holder_curve import HolderCurveResult
+from src.opportunity.social_meta import SocialMetaResult
 from src.opportunity.scorer import OpportunityScorer, OpportunityScoreResult
 from src.filters.pipeline import filter_pipeline
 from src.filters.schemas import SafetyCheckResult
 from src.filters.bundling import BundlingResult
+
 
 
 @pytest.mark.asyncio
@@ -197,18 +200,24 @@ async def test_opportunity_scorer_weight_redistribution():
         p90_fee_micro_lamports=40000, valid_fee_sample_count=50, is_successful=True
     )
 
+    mock_holder_failed = HolderCurveResult(score=0.0, bonding_curve_pct=0.0, unique_holders_count=0, is_successful=False)
+    mock_social_failed = SocialMetaResult(score=0.0, is_successful=False)
+
     with patch("src.opportunity.scorer.volume_velocity_engine.calculate_velocity", AsyncMock(return_value=mock_vol)):
         with patch("src.opportunity.scorer.smart_money_engine.evaluate_token_smart_money", AsyncMock(return_value=mock_smart)):
             with patch("src.opportunity.scorer.global_fee_engine.calculate_fee_urgency", AsyncMock(return_value=mock_fee)):
-                res: OpportunityScoreResult = await scorer.score_token(event)
+                with patch("src.opportunity.scorer.holder_curve_engine.evaluate_holder_curve", AsyncMock(return_value=mock_holder_failed)):
+                    with patch("src.opportunity.scorer.social_meta_engine.evaluate_social_meta", AsyncMock(return_value=mock_social_failed)):
+                        res: OpportunityScoreResult = await scorer.score_token(event)
 
-                assert res.opportunity_score > 0.0
-                assert res.opportunity_score <= 100.0
-                assert set(res.active_components) == {"vol_velocity", "smart_money", "global_fee"}
-                # Check sum of effective weights == 1.0
-                assert round(sum(res.weights_used.values()), 2) == 1.0
-                assert res.metric_snapshot is not None
-                assert res.metric_snapshot.opportunity_score == res.opportunity_score
+                        assert res.opportunity_score > 0.0
+                        assert res.opportunity_score <= 100.0
+                        assert set(res.active_components) == {"vol_velocity", "smart_money", "global_fee"}
+                        # Check sum of effective weights == 1.0
+                        assert round(sum(res.weights_used.values()), 2) == 1.0
+                        assert res.metric_snapshot is not None
+                        assert res.metric_snapshot.opportunity_score == res.opportunity_score
+
 
 
 @pytest.mark.asyncio
@@ -457,16 +466,24 @@ async def test_smart_money_empty_registry_weight_redistribution():
         p90_fee_micro_lamports=40000, valid_fee_sample_count=50, is_successful=True
     )
 
+    mock_holder_failed = HolderCurveResult(score=0.0, bonding_curve_pct=0.0, unique_holders_count=0, is_successful=False)
+    mock_social_failed = SocialMetaResult(score=0.0, is_successful=False)
+
     with patch("src.opportunity.scorer.volume_velocity_engine.calculate_velocity", AsyncMock(return_value=mock_vol)):
         with patch("src.opportunity.scorer.smart_money_engine.evaluate_token_smart_money", AsyncMock(return_value=mock_smart_empty)):
             with patch("src.opportunity.scorer.global_fee_engine.calculate_fee_urgency", AsyncMock(return_value=mock_fee)):
-                res: OpportunityScoreResult = await scorer.score_token(event)
+                with patch("src.opportunity.scorer.holder_curve_engine.evaluate_holder_curve", AsyncMock(return_value=mock_holder_failed)):
+                    with patch("src.opportunity.scorer.social_meta_engine.evaluate_social_meta", AsyncMock(return_value=mock_social_failed)):
+                        res: OpportunityScoreResult = await scorer.score_token(event)
 
-                assert res.opportunity_score > 0.0
-                # Active components should only be vol_velocity and global_fee (smart_money excluded cleanly)
-                assert set(res.active_components) == {"vol_velocity", "global_fee"}
-                assert "smart_money" not in res.active_components
-                # Base weights: vol=0.35, fee=0.15 (total active base weight = 0.50)
+                        assert res.opportunity_score > 0.0
+                        # Active components should only be vol_velocity and global_fee (smart_money, holder, social excluded cleanly)
+                        assert set(res.active_components) == {"vol_velocity", "global_fee"}
+                        assert "smart_money" not in res.active_components
+                        # Base weights: vol=0.35, fee=0.15 (total active base weight = 0.50)
+                        assert res.weights_used["vol_velocity"] == 0.70
+                        assert res.weights_used["global_fee"] == 0.30
+
                 # Normalized effective weights: vol = 0.35/0.50 = 0.70, fee = 0.15/0.50 = 0.30
                 assert res.weights_used["vol_velocity"] == 0.70
                 assert res.weights_used["global_fee"] == 0.30

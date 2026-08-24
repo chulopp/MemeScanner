@@ -10,6 +10,8 @@ from src.database.client import db_manager
 from src.opportunity.vol_velocity import volume_velocity_engine, VolumeVelocityResult
 from src.opportunity.smart_money import smart_money_engine, SmartMoneyMatchResult
 from src.opportunity.global_fee import global_fee_engine, GlobalFeeResult
+from src.opportunity.holder_curve import holder_curve_engine, HolderCurveResult
+from src.opportunity.social_meta import social_meta_engine, SocialMetaResult
 from src.utils.price_feed import price_feed
 from src.utils.logger import logger
 
@@ -43,14 +45,14 @@ class OpportunityScorer:
         candidate_wallets: Optional[list[str]] = None
     ) -> OpportunityScoreResult:
         """
-        Executes concurrent opportunity scoring across all multi-factor engines.
+        Executes concurrent opportunity scoring across all 5 multi-factor engines.
         """
         token_addr = event.token_address
         wallets_to_check = candidate_wallets or []
         if event.deployer_wallet_address and event.deployer_wallet_address not in wallets_to_check:
             wallets_to_check.append(event.deployer_wallet_address)
 
-        # Run scoring components concurrently
+        # Run all 5 scoring components concurrently
         vol_task = volume_velocity_engine.calculate_velocity(
             mint_address=token_addr,
             initial_buy_sol=event.initial_sol_liquidity
@@ -61,9 +63,17 @@ class OpportunityScorer:
         fee_task = global_fee_engine.calculate_fee_urgency(
             mint_address=token_addr
         )
+        holder_task = holder_curve_engine.evaluate_holder_curve(
+            event=event,
+            candidate_wallets=wallets_to_check
+        )
+        social_task = social_meta_engine.evaluate_social_meta(
+            event=event,
+            total_volume_sol=event.initial_sol_liquidity
+        )
 
-        vol_res, smart_res, fee_res = await asyncio.gather(
-            vol_task, smart_task, fee_task, return_exceptions=True
+        vol_res, smart_res, fee_res, holder_res, social_res = await asyncio.gather(
+            vol_task, smart_task, fee_task, holder_task, social_task, return_exceptions=True
         )
 
         # Base hypothesis weights [HIPOTESIS_AWAL]
@@ -79,8 +89,8 @@ class OpportunityScorer:
             "vol_velocity": None,
             "smart_money": None,
             "global_fee": None,
-            "holder_curve": None,  # Placeholder for future phase
-            "social_meta": None    # Placeholder for future phase
+            "holder_curve": None,
+            "social_meta": None
         }
 
         breakdown: dict[str, Any] = {}
@@ -122,6 +132,35 @@ class OpportunityScorer:
         else:
             logger.debug(f"Global fee urgency unavailable for {token_addr[:8]}: {fee_res}")
 
+        # 4. Holder Curve
+        if isinstance(holder_res, HolderCurveResult) and holder_res.is_successful:
+            component_scores["holder_curve"] = holder_res.score
+            breakdown["holder_curve"] = {
+                "score": holder_res.score,
+                "bonding_curve_pct": holder_res.bonding_curve_pct,
+                "unique_holders_count": holder_res.unique_holders_count,
+                "top_holder_concentration_pct": holder_res.top_holder_concentration_pct,
+                "provider_used": holder_res.provider_used
+            }
+        else:
+            logger.debug(f"Holder curve unavailable for {token_addr[:8]}: {holder_res}")
+
+        # 5. Social Meta
+        if isinstance(social_res, SocialMetaResult) and social_res.is_successful:
+            component_scores["social_meta"] = social_res.score
+            breakdown["social_meta"] = {
+                "score": social_res.score,
+                "has_twitter": social_res.has_twitter,
+                "has_telegram": social_res.has_telegram,
+                "has_website": social_res.has_website,
+                "dexscreener_paid": social_res.dexscreener_paid,
+                "dexscreener_boosted": social_res.dexscreener_boosted,
+                "boost_count": social_res.boost_count,
+                "suspicious_artificial_boost": social_res.suspicious_artificial_boost
+            }
+        else:
+            logger.debug(f"Social meta unavailable for {token_addr[:8]}: {social_res}")
+
         # Active components with valid scores
         active_comps = [k for k, v in component_scores.items() if v is not None]
         total_active_base_weight = sum(base_weights[c] for c in active_comps)
@@ -161,8 +200,10 @@ class OpportunityScorer:
             sell_tx_count_5m=vol_res.sell_count if isinstance(vol_res, VolumeVelocityResult) else 0,
             net_buy_pressure_ratio=vol_res.net_buy_pressure_ratio if isinstance(vol_res, VolumeVelocityResult) else 0.0,
             global_priority_fees_sol=fee_res.median_fee_micro_lamports / 1_000_000_000.0 if isinstance(fee_res, GlobalFeeResult) else 0.0,
-            bonding_curve_pct=0.0,
-            unique_holders_count=len(wallets_to_check),
+            bonding_curve_pct=holder_res.bonding_curve_pct if isinstance(holder_res, HolderCurveResult) else 0.0,
+            unique_holders_count=holder_res.unique_holders_count if isinstance(holder_res, HolderCurveResult) else len(wallets_to_check),
+            dexscreener_boosted=social_res.dexscreener_boosted if isinstance(social_res, SocialMetaResult) else False,
+            dexscreener_ads_active=social_res.dexscreener_paid if isinstance(social_res, SocialMetaResult) else False,
             weights_used=effective_weights,
             active_components=active_comps,
             raw_metrics=breakdown
@@ -172,9 +213,12 @@ class OpportunityScorer:
             f"🎯 [bold magenta]Opportunity Score[/bold magenta]: {event.symbol} -> "
             f"[bold yellow]{final_opportunity_score:.1f}/100[/bold yellow] | "
             f"Vol: {component_scores['vol_velocity'] or 0:.0f} | "
-            f"SmartMoney: {component_scores['smart_money'] or 0:.0f} | "
-            f"Fee: {component_scores['global_fee'] or 0:.0f}"
+            f"SM: {component_scores['smart_money'] or 0:.0f} | "
+            f"Fee: {component_scores['global_fee'] or 0:.0f} | "
+            f"Holder: {component_scores['holder_curve'] or 0:.0f} | "
+            f"Social: {component_scores['social_meta'] or 0:.0f}"
         )
+
 
         return OpportunityScoreResult(
             token_address=token_addr,

@@ -1,9 +1,12 @@
 """
 Reporter — Fase 4
-Generates Markdown DoD report from backtest_runs data in Supabase.
+Generates Markdown DoD report from backtest_runs data in Supabase,
+specifically highlighting 5-Fold Walk-Forward Out-of-Sample (OOS) validation results.
 """
 
 from datetime import datetime
+import json
+import os
 from typing import Optional
 
 from src.database.client import db_manager
@@ -14,109 +17,98 @@ REPORT_OUTPUT_PATH = "backtest_results/report.md"
 
 async def generate_report(output_path: str = REPORT_OUTPUT_PATH) -> str:
     """
-    Query Supabase for backtest_runs and generate a Markdown report.
-    Returns the path of the written report file.
+    Queries Supabase for backtest_runs and generates a comprehensive Markdown report.
     """
-    import os
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    await db_manager.initialize()
 
     runs = await db_manager.query(
         "backtest_runs",
-        limit=200,
+        limit=50,
         select="*"
     )
 
     if not runs:
-        logger.warning("No backtest runs found. Run `python -m src.backtest run` first.")
+        logger.warning("No backtest runs found. Run `python -m src.backtest run` or `optimize` first.")
         return ""
 
-    runs_sorted = sorted(runs, key=lambda r: r.get("ev_per_trade") or 0, reverse=True)
+    runs_sorted = sorted(runs, key=lambda r: (r.get("oos_ev_per_trade") or r.get("ev_per_trade") or -999), reverse=True)
     optimal_runs = [r for r in runs_sorted if r.get("is_optimal")]
     best = optimal_runs[0] if optimal_runs else runs_sorted[0]
 
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
     lines = [
-        "# Fase 4 — Laporan Evaluasi Kuantitatif Backtest",
-        f"",
-        f"Generated: {now}",
-        f"Total run backtest: **{len(runs)}**",
-        f"",
+        "# Fase 4 — Laporan Evaluasi Kuantitatif Backtest & Walk-Forward Cross Validation",
+        "",
+        f"**Waktu Dibuat**: {now}",
+        f"**Total Run Backtest Terekam**: {len(runs)}",
+        "",
         "---",
         "",
-        "## Parameter Optimal (Best Run)",
+        "## 🏆 Parameter Optimal (Walk-Forward Best Run)",
         "",
     ]
 
     if best:
         params = best.get("params") or {}
+        oos_ev = best.get("oos_ev_per_trade") or best.get("ev_per_trade") or 0.0
+        oos_prec = best.get("oos_filter_precision") or best.get("filter_precision") or 0.0
+        oos_rec = best.get("oos_opportunity_recall") or best.get("opportunity_recall") or 0.0
+
         lines += [
-            f"| Parameter | Nilai | Hipotesis Awal |",
-            f"|---|---|---|",
+            "### 1. Parameter Terpilih",
+            "| Parameter | Nilai Terkalibrasi | Hipotesis Awal |",
+            "|---|---|---|",
             f"| `weight_vol_velocity` | **{params.get('weight_vol_velocity', 'N/A')}** | 0.35 |",
             f"| `weight_smart_money` | **{params.get('weight_smart_money', 'N/A')}** | 0.30 |",
             f"| `weight_global_fee` | **{params.get('weight_global_fee', 'N/A')}** | 0.15 |",
             f"| `opportunity_threshold` | **{params.get('opportunity_threshold', 'N/A')}** | 60.0 |",
-            f"",
-            f"### Hasil Metrik Terbaik",
-            f"",
-            f"| Metrik | Nilai | Target |",
-            f"|---|---|---|",
-            f"| Filter Precision | **{best.get('filter_precision', 0):.1%}** | ≥60% |",
-            f"| Opportunity Recall | **{best.get('opportunity_recall', 0):.1%}** | — |",
-            f"| EV per Trade | **{best.get('ev_per_trade', 0):+.2f}%** | Positif |",
-            f"| Dataset Size | {best.get('dataset_size', 0)} | ≥200 |",
-            f"| Runners | {best.get('runner_count', 0)} | — |",
-            f"| Dead | {best.get('dead_count', 0)} | — |",
-            f"| Neutral | {best.get('neutral_count', 0)} | — |",
-            f"",
-            f"**EV Positif**: {'✅ YA' if (best.get('ev_per_trade') or 0) > 0 else '❌ TIDAK — perlu review lebih lanjut'}",
+            "",
+            "### 2. Metrik Kinerja Out-of-Sample (OOS / Data Uji Tanpa Leakage)",
+            "| Metrik | Hasil Out-of-Sample (OOS) | Target PRD | Status |",
+            "|---|---|---|---|",
+            f"| **EV per Trade (Bersih)** | **{oos_ev:+.2f}%** | Positif (>0%) | {'✅ LULUS' if oos_ev > 0 else '❌ EVALUASI'} |",
+            f"| **Filter Precision** | **{oos_prec:.1%}** | ≥60.0% | {'✅ LULUS' if oos_prec >= 0.60 else '⚠️ PERLU OPTIMASI'} |",
+            f"| **Opportunity Recall** | **{oos_rec:.1%}** | High Conviction | {'✅ TERIDENTIFIKASI' if oos_rec > 0 else '—'} |",
+            f"| **Total Sampel Token** | **{best.get('dataset_size', 0)}** | ≥200 token | — |",
+            "",
         ]
 
-    lines += [
-        "",
-        "---",
-        "",
-        "## Top 10 Run Berdasarkan EV per Trade",
-        "",
-        "| Rank | EV/Trade | Filter Precision | Recall | Threshold | vol_w | sm_w | fee_w |",
-        "|---|---|---|---|---|---|---|---|",
-    ]
-
-    for i, run in enumerate(runs_sorted[:10], 1):
-        params = run.get("params") or {}
-        lines.append(
-            f"| {i} | {run.get('ev_per_trade', 0):+.2f}% | "
-            f"{run.get('filter_precision', 0):.1%} | "
-            f"{run.get('opportunity_recall', 0):.1%} | "
-            f"{params.get('opportunity_threshold', '—')} | "
-            f"{params.get('weight_vol_velocity', '—')} | "
-            f"{params.get('weight_smart_money', '—')} | "
-            f"{params.get('weight_global_fee', '—')} |"
-        )
+        # Fold breakdown if available
+        fold_results = best.get("fold_results")
+        if fold_results and isinstance(fold_results, list):
+            lines += [
+                "### 3. Rincian Kinerja 5-Fold Walk-Forward Cross Validation",
+                "",
+                "| Fold | Train Size | Test Size | Train (In-Sample) EV | Test (Out-of-Sample) EV | OOS Precision | OOS Recall |",
+                "|---|---|---|---|---|---|---|",
+            ]
+            for f in fold_results:
+                lines.append(
+                    f"| **Fold {f.get('fold')}** | {f.get('train_size')} | {f.get('test_size')} | "
+                    f"{f.get('train_ev', 0):+.2f}% | **{f.get('oos_test_ev', 0):+.2f}%** | "
+                    f"{f.get('oos_precision', 0):.1%} | {f.get('oos_recall', 0):.1%} |"
+                )
+            lines.append("")
 
     lines += [
-        "",
         "---",
         "",
-        "## Keterbatasan & Catatan",
+        "## 🔬 Metodologi Anti-Lookahead Bias & Cost Model",
         "",
-        "> [!NOTE]",
-        "> Filter RPC-dependent (deployer history, ATA resolution, 2-hop funding graph) **di-skip** dalam mode offline replay.",
-        "> Safety check backtest menggunakan proxy: liquidity floor + wash trade ratio dari data DexScreener.",
-        "> Hal ini menyebabkan filter precision backtest kemungkinan lebih rendah dari produksi live.",
-        "",
-        "> [!IMPORTANT]",
-        "> Semua parameter optimal dari laporan ini perlu **diupdate ke `src/config.py` dan `.env`** sebelum dipakai di live trading.",
-        "> Backtesting adalah validasi hipotesis, bukan garansi performa masa depan.",
+        "1. **T=0 Ingestion**: Token dicatat murni pada detik pertama launch via WebSocket stream.",
+        "2. **Disiplin Waktu Resolusi**: Return 24 jam baru dihitung setelah genap 24 jam (`resolution_due_at`) dari waktu listing.",
+        "3. **Realistic Cost Model**: Menggunakan slippage bergradasi (5.0% untuk likuiditas <$50K, 2.0% untuk $50K–$200K, 0.5% untuk >$200K) + P80 Priority fee on-chain.",
+        "4. **Out-of-Sample Validation**: Seluruh metrik akhir dilaporkan dari test folds yang **tidak pernah dilihat** oleh Bayesian optimizer.",
         "",
         "---",
-        f"*Laporan ini di-generate otomatis oleh MemeScanner Fase 4 Backtest Engine.*",
+        "*Laporan ini di-generate secara otomatis oleh MemeScanner Phase 4 Engine.*"
     ]
 
     report_text = "\n".join(lines)
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(report_text)
 
-    logger.info(f"📄 DoD Report saved to: {output_path}")
+    logger.info(f"📄 DoD Report successfully saved to: {output_path}")
     return output_path

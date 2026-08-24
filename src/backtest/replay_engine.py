@@ -73,46 +73,23 @@ def _build_raw_token_event(row: dict) -> Optional[RawTokenEvent]:
         return None
 
 
-async def run_replay(
+async def run_replay_on_tokens(
+    tokens: list[dict],
     opportunity_threshold: float = 60.0,  # HYPOTHESIS_INIT
-    weight_overrides: Optional[dict] = None,
-    limit: int = 500
+    weight_overrides: Optional[dict] = None
 ) -> BacktestMetrics:
     """
-    Main replay function. Processes labeled backtest_tokens through the existing
-    scoring engines and returns BacktestMetrics.
-
-    Args:
-        opportunity_threshold: Score cutoff for opportunity classification (HYPOTHESIS_INIT)
-        weight_overrides: Optional dict of {component_name: weight} to override base weights
-                          Keys: vol_velocity, smart_money, global_fee
-        limit: Max tokens to process in this run
-
-    Returns:
-        BacktestMetrics with filter precision, recall, and EV per trade
+    Executes replay evaluation on a specific list of token dicts (used by Walk-Forward CV).
     """
-    logger.info(f"▶️  Starting replay engine (threshold={opportunity_threshold}, limit={limit})")
-
-    rows = await db_manager.query(
-        "backtest_tokens",
-        filters={"label": "not.is.null"},
-        limit=limit
-    )
-
-    if not rows:
-        logger.warning("No labeled tokens found in backtest_tokens. Run `collect` + `label` first.")
+    if not tokens:
         return compute_metrics([], opportunity_threshold)
-
-    logger.info(f"Loaded {len(rows)} labeled tokens for replay")
 
     # Load P80 priority fee from actual Supabase data
     p80_fee_sol = await load_p80_priority_fee_from_supabase()
     cost_config = CostModelConfig(priority_fee_sol=p80_fee_sol)
-    logger.info(f"💸 Cost model: P80 priority fee = {p80_fee_sol:.5f} SOL")
 
     scorer = OpportunityScorer()
     signals: list[BacktestSignal] = []
-    processed = 0
 
     # Build settings overrides for weight injection
     settings_patches: dict = {}
@@ -124,7 +101,7 @@ async def run_replay(
         if "global_fee" in weight_overrides:
             settings_patches["score_w_global_fee"] = weight_overrides["global_fee"]
 
-    for row in rows:
+    for row in tokens:
         event = _build_raw_token_event(row)
         if not event:
             continue
@@ -164,12 +141,37 @@ async def run_replay(
             rejection_reason=rejection_reason
         ))
 
-        processed += 1
-        if processed % 50 == 0:
-            logger.info(f"▶️  Processed {processed}/{len(rows)} tokens in replay...")
+    return compute_metrics(signals, opportunity_threshold)
 
-    logger.info(f"✅ Replay complete: {processed} tokens processed")
-    metrics = compute_metrics(signals, opportunity_threshold)
+
+async def run_replay(
+    opportunity_threshold: float = 60.0,  # HYPOTHESIS_INIT
+    weight_overrides: Optional[dict] = None,
+    limit: int = 500
+) -> BacktestMetrics:
+    """
+    Main replay function. Loads resolved backtest_tokens from Supabase and processes them.
+    """
+    logger.info(f"▶️  Starting replay engine (threshold={opportunity_threshold}, limit={limit})")
+    await db_manager.initialize()
+
+    rows = await db_manager.query(
+        "backtest_tokens",
+        filters={"label": "not.is.null"},
+        limit=limit
+    )
+
+    if not rows:
+        logger.warning("No labeled tokens found in backtest_tokens. Run `collect` + `label` first.")
+        return compute_metrics([], opportunity_threshold)
+
+    logger.info(f"Loaded {len(rows)} labeled tokens for replay")
+    metrics = await run_replay_on_tokens(
+        tokens=rows,
+        opportunity_threshold=opportunity_threshold,
+        weight_overrides=weight_overrides
+    )
+
     logger.info(
         f"📊 Results: Filter Precision={metrics.filter_precision:.1%} | "
         f"Opp Recall={metrics.opportunity_recall:.1%} | "

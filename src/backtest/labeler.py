@@ -1,15 +1,14 @@
 """
-Labeler — Fase 4
-Mengambil harga saat ini dari DexScreener untuk token yang sudah dikumpulkan,
-menghitung return % vs harga saat listing, dan assign label:
-  - 'runner': return ≥ +100% (≥2x)
-  - 'dead'  : return ≤ -70%
-  - 'neutral': sisanya
-
-Hanya token yang price_usd_at_listing > 0 yang bisa dilabeli.
+Outcome Resolver & Labeler — Fase 4 & 5
+Resolves outcomes for tokens whose 24-hour observation window has elapsed.
+Fetches actual 24-hour price from DexScreener/RPC and classifies ground-truth outcomes:
+  - 'runner' : return ≥ +100% (≥2x)
+  - 'dead'   : return ≤ -70% or pool liquidity dried up
+  - 'neutral': otherwise
 """
 
 import asyncio
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -18,15 +17,18 @@ from src.database.client import db_manager
 from src.utils.logger import logger
 
 DEXSCREENER_TOKEN_URL = "https://api.dexscreener.com/latest/dex/tokens/{mint}"
-REQUEST_DELAY_SECONDS = 1.2
+REQUEST_DELAY_SECONDS = 1.0
 
-# Thresholds — HYPOTHESIS_INIT (dapat dikalibrasi di Fase 5)
-RUNNER_THRESHOLD_PCT = 100.0   # HYPOTHESIS_INIT: ≥2x
-DEAD_THRESHOLD_PCT = -70.0     # HYPOTHESIS_INIT: ≤-70%
+# Thresholds — HYPOTHESIS_INIT
+RUNNER_THRESHOLD_PCT = 100.0
+DEAD_THRESHOLD_PCT = -70.0
 
 
-async def _get_current_price(client: httpx.AsyncClient, mint: str) -> Optional[float]:
-    """Fetch current price for a token from DexScreener."""
+async def _fetch_current_token_price(client: httpx.AsyncClient, mint: str) -> Optional[tuple[float, float, float]]:
+    """
+    Fetches latest price (USD), 24h volume (USD), and liquidity (USD) from DexScreener.
+    Returns (price_usd, volume_24h_usd, liquidity_usd) or None.
+    """
     try:
         resp = await client.get(
             DEXSCREENER_TOKEN_URL.format(mint=mint),
@@ -36,99 +38,119 @@ async def _get_current_price(client: httpx.AsyncClient, mint: str) -> Optional[f
             return None
         data = resp.json()
         pairs = data.get("pairs")
-        if not pairs:
-            return None
-        # Best pair by liquidity
-        best = sorted(
+        if not pairs or not isinstance(pairs, list):
+            # If no pairs exist after 24h, the token likely never graduated or rugged
+            return (0.0, 0.0, 0.0)
+
+        # Pick the pair with highest liquidity
+        best_pair = sorted(
             pairs,
             key=lambda p: float((p.get("liquidity") or {}).get("usd", 0) or 0),
             reverse=True
         )[0]
-        price_str = best.get("priceUsd", "0") or "0"
-        return float(price_str)
+
+        price_str = best_pair.get("priceUsd", "0") or "0"
+        price_usd = float(price_str)
+        vol_24h = float((best_pair.get("volume") or {}).get("h24", 0) or 0)
+        liq_usd = float((best_pair.get("liquidity") or {}).get("usd", 0) or 0)
+
+        return (price_usd, vol_24h, liq_usd)
     except Exception as e:
-        logger.debug(f"Price fetch error for {mint[:8]}: {e}")
+        logger.debug(f"DexScreener price query error for {mint[:8]}: {e}")
         return None
 
 
-def _assign_label(return_pct: float) -> str:
-    """Classify token outcome based on return from listing price."""
-    if return_pct >= RUNNER_THRESHOLD_PCT:
-        return "runner"
-    elif return_pct <= DEAD_THRESHOLD_PCT:
+def assign_label(return_pct: float, liquidity_usd: float = 10_000.0) -> str:
+    """Classifies token outcome based on 24h return percentage and liquidity."""
+    if liquidity_usd < 500.0 or return_pct <= DEAD_THRESHOLD_PCT:
         return "dead"
+    elif return_pct >= RUNNER_THRESHOLD_PCT:
+        return "runner"
     else:
         return "neutral"
 
 
-async def label_backtest_tokens(limit: int = 500) -> dict:
+async def resolve_due_tokens(limit: int = 500, force_all_unresolved: bool = False) -> dict:
     """
-    Fetch current price for unlabeled backtest_tokens and assign labels.
-    Returns summary dict: {total, labeled, skipped, runners, dead, neutral}
+    Finds tokens whose 24-hour observation period is complete (now >= resolution_due_at),
+    fetches their 24h price, and marks them as resolved in Supabase.
     """
-    logger.info("🏷️  Starting backtest token labeling via DexScreener...")
+    now_utc = datetime.now(tz=timezone.utc)
+    now_iso = now_utc.isoformat()
 
-    # Fetch unlabeled tokens from Supabase
+    logger.info(f"🔍 Checking for tokens ready for 24h resolution (now: {now_iso[:19]})...")
+    await db_manager.initialize()
+
+    # Query unresolved tokens
+    filters = {"is_resolved": "eq.false"}
+    if not force_all_unresolved:
+        filters["resolution_due_at"] = f"lte.{now_iso}"
+
     rows = await db_manager.query(
         "backtest_tokens",
-        filters={"label": "is.null"},
+        filters=filters,
         limit=limit
     )
 
     if not rows:
-        logger.info("No unlabeled tokens found.")
-        return {"total": 0, "labeled": 0, "skipped": 0, "runners": 0, "dead": 0, "neutral": 0}
+        logger.info("ℹ️ No tokens are due for 24h resolution at this moment.")
+        return {"total_checked": 0, "resolved": 0, "runners": 0, "dead": 0, "neutral": 0, "pending": 0}
 
-    logger.info(f"Found {len(rows)} unlabeled tokens")
+    logger.info(f"Found {len(rows)} tokens ready for 24h outcome resolution.")
+    stats = {"total_checked": len(rows), "resolved": 0, "runners": 0, "dead": 0, "neutral": 0, "pending": 0}
 
-    stats = {"total": len(rows), "labeled": 0, "skipped": 0, "runners": 0, "dead": 0, "neutral": 0}
-
-    async with httpx.AsyncClient(
-        headers={"User-Agent": "MemeScanner-Backtest/1.0"},
-        timeout=15.0
-    ) as client:
+    async with httpx.AsyncClient(headers={"User-Agent": "MemeScanner-Resolver/1.0"}, timeout=15.0) as client:
         for row in rows:
             mint = row["token_address"]
-            price_at_listing = row.get("price_usd_at_listing") or 0.0
+            launch_price = row.get("launch_price_usd") or row.get("price_usd_at_listing") or 0.0
 
-            if price_at_listing <= 0:
-                # Cannot compute return without a baseline price
-                stats["skipped"] += 1
-                logger.debug(f"Skipping {mint[:8]} — no listing price")
+            if launch_price <= 0:
+                logger.debug(f"Skipping {mint[:8]} — invalid launch price ({launch_price})")
                 continue
 
-            current_price = await _get_current_price(client, mint)
+            price_data = await _fetch_current_token_price(client, mint)
             await asyncio.sleep(REQUEST_DELAY_SECONDS)
 
-            if current_price is None or current_price <= 0:
-                stats["skipped"] += 1
+            if price_data is None:
+                stats["pending"] += 1
                 continue
 
-            return_pct = ((current_price - price_at_listing) / price_at_listing) * 100.0
-            label = _assign_label(return_pct)
+            current_price, vol_24h, liq_usd = price_data
+            if current_price > 0:
+                return_pct = ((current_price - launch_price) / launch_price) * 100.0
+            else:
+                return_pct = -100.0  # 100% loss / total rug
 
-            # Update Supabase row
+            label = assign_label(return_pct, liquidity_usd=liq_usd)
+
+            updates = {
+                "label": label,
+                "label_return_pct": round(return_pct, 4),
+                "price_24h_usd": current_price,
+                "price_usd_24h": current_price,
+                "liquidity_usd": liq_usd,
+                "volume_24h_usd": vol_24h,
+                "is_resolved": True,
+                "resolved_at": now_iso
+            }
+
             try:
                 await db_manager.update(
                     "backtest_tokens",
-                    {"label": label, "label_return_pct": round(return_pct, 4), "price_usd_24h": current_price},
+                    updates,
                     filters={"token_address": f"eq.{mint}"}
                 )
-                stats["labeled"] += 1
+                stats["resolved"] += 1
                 stats[label] += 1
-
-                if stats["labeled"] % 25 == 0:
-                    logger.info(
-                        f"🏷️  Labeled {stats['labeled']} tokens "
-                        f"(runners: {stats['runners']}, dead: {stats['dead']}, "
-                        f"neutral: {stats['neutral']})"
-                    )
+                logger.info(
+                    f"✅ [Resolved 24h] {row.get('symbol', 'TOKEN')} ({mint[:8]}...) -> "
+                    f"Label: {label.upper()} ({return_pct:+.1f}%) | Price: ${current_price:.8f}"
+                )
             except Exception as e:
-                logger.debug(f"Update error for {mint[:8]}: {e}")
-                stats["skipped"] += 1
+                logger.debug(f"Failed to update resolution for {mint[:8]}: {e}")
 
     logger.info(
-        f"✅ Labeling complete: {stats['labeled']} labeled, {stats['skipped']} skipped | "
+        f"🎯 Resolution complete: {stats['resolved']} tokens resolved | "
         f"Runners: {stats['runners']} | Dead: {stats['dead']} | Neutral: {stats['neutral']}"
     )
     return stats

@@ -68,7 +68,7 @@ async def record_signal(
             f"Score: {score:.1f} | Entry: ${entry_price:.8f} | Liq: ${entry_liq:,.0f}"
         )
 
-        # Send Telegram notification for above-threshold signals
+        # Send Telegram notification for above-threshold signals (Stage 1 Fast-Path)
         if not is_baseline:
             msg_id = await telegram_notifier.send_signal_notification(
                 token_address=event.token_address,
@@ -88,11 +88,89 @@ async def record_signal(
                     filters={"id": f"eq.{signal_id}"}
                 )
 
+                # Stage 2: Trigger async LLM synthesis & in-place message edit
+                asyncio.create_task(_run_stage2_synthesis(
+                    event=event,
+                    safety_result=safety_result,
+                    score=score,
+                    score_breakdown=breakdown,
+                    entry_price_usd=entry_price,
+                    entry_liquidity_usd=entry_liq,
+                    msg_id=msg_id,
+                    signal_id=signal_id
+                ))
+
         return signal_id
 
     except Exception as e:
         logger.error(f"❌ Failed to record signal for {event.token_address[:8]}: {e}")
         return None
+
+
+async def _run_stage2_synthesis(
+    event: RawTokenEvent,
+    safety_result: SafetyCheckResult,
+    score: float,
+    score_breakdown: dict,
+    entry_price_usd: float,
+    entry_liquidity_usd: float,
+    msg_id: int,
+    signal_id: str
+):
+    """Async background worker for Stage 2 LLM reasoning synthesis & message editing."""
+    try:
+        from src.llm.synthesis_engine import synthesis_engine
+        reasoning = await synthesis_engine.generate_synthesis(
+            event=event,
+            safety_result=safety_result,
+            score=score,
+            score_breakdown=score_breakdown,
+            entry_price_usd=entry_price_usd,
+            entry_liquidity_usd=entry_liq
+        )
+
+        if reasoning:
+            # Edit Telegram message with 3-bullet points
+            await telegram_notifier.edit_signal_with_synthesis(
+                message_id=msg_id,
+                token_address=event.token_address,
+                symbol=event.symbol or "UNKNOWN",
+                name=event.name or "",
+                opportunity_score=score,
+                score_breakdown=score_breakdown,
+                entry_price_usd=entry_price_usd,
+                entry_liquidity_usd=entry_liquidity_usd,
+                launch_venue=event.launch_venue,
+                reasoning_text=reasoning,
+                is_baseline=False
+            )
+
+            # Persist reasoning to Supabase
+            await db_manager.update(
+                "paper_signals",
+                {
+                    "llm_reasoning": reasoning,
+                    "two_stage_status": "COMPLETED"
+                },
+                filters={"id": f"eq.{signal_id}"}
+            )
+        else:
+            await db_manager.update(
+                "paper_signals",
+                {"two_stage_status": "SKIPPED"},
+                filters={"id": f"eq.{signal_id}"}
+            )
+    except Exception as e:
+        logger.warning(f"Stage 2 synthesis background task error: {e}")
+        try:
+            await db_manager.update(
+                "paper_signals",
+                {"two_stage_status": "FAILED"},
+                filters={"id": f"eq.{signal_id}"}
+            )
+        except Exception:
+            pass
+
 
 
 def _extract_filter_tags(result: SafetyCheckResult) -> list[str]:

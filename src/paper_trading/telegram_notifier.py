@@ -21,7 +21,27 @@ except ImportError:
     Bot = None
 
 
+import html
+import re
+
+
+def _format_markdown_to_html(raw_text: str) -> str:
+    """Converts standard LLM markdown formatting to Telegram-compatible HTML."""
+    if not raw_text:
+        return ""
+    # 1. Escape basic HTML entities
+    escaped = html.escape(raw_text)
+    # 2. Bold: **text** -> <b>text</b>
+    escaped = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', escaped)
+    # 3. Italic: *text* -> <i>text</i>
+    escaped = re.sub(r'(?<!\w)\*([^\*\n]+?)\*(?!\w)', r'<i>\1</i>', escaped)
+    # 4. Inline code: `code` -> <code>code</code>
+    escaped = re.sub(r'`([^`\n]+?)`', r'<code>\1</code>', escaped)
+    return escaped.strip()
+
+
 class TelegramNotifier:
+
     """Sends Stage 1 fast-path notifications to a Telegram chat."""
 
     def __init__(self):
@@ -164,7 +184,8 @@ class TelegramNotifier:
         liq_display = f"${entry_liquidity_usd:,.0f}" if entry_liquidity_usd else "N/A"
         safe_sym = html.escape(symbol)
         safe_name = html.escape(name)
-        safe_reasoning = html.escape(reasoning_text)
+        safe_reasoning = _format_markdown_to_html(reasoning_text)
+
 
         text = (
             f"{signal_type}: <b>${safe_sym}</b> | {safe_name}\n"

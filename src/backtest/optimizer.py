@@ -25,15 +25,23 @@ try:
     from skopt.space import Real
     SKOPT_AVAILABLE = True
 except ImportError:
+    gp_minimize = None
+    Real = None
     SKOPT_AVAILABLE = False
 
 
-SEARCH_SPACE = [
-    Real(0.30, 0.45, name="weight_vol_velocity"),   # HYPOTHESIS_INIT: 0.35
-    Real(0.25, 0.40, name="weight_smart_money"),     # HYPOTHESIS_INIT: 0.30
-    Real(0.10, 0.20, name="weight_global_fee"),      # HYPOTHESIS_INIT: 0.15
-    Real(50.0, 75.0, name="opportunity_threshold"),  # HYPOTHESIS_INIT: 60.0
-]
+def _get_search_space():
+    if not SKOPT_AVAILABLE or Real is None:
+        return []
+    return [
+        Real(0.20, 0.45, name="weight_vol_velocity"),   # Base: 0.35
+        Real(0.15, 0.40, name="weight_smart_money"),     # Base: 0.30
+        Real(0.05, 0.25, name="weight_global_fee"),      # Base: 0.15
+        Real(0.05, 0.20, name="weight_holder_curve"),    # Base: 0.10
+        Real(0.05, 0.20, name="weight_social_meta"),     # Base: 0.10
+        Real(25.0, 70.0, name="opportunity_threshold"),  # Base: 60.0
+    ]
+
 
 
 async def run_bayesian_optimization(
@@ -68,53 +76,71 @@ async def run_bayesian_optimization(
 
     logger.info(f"🔬 Starting Bayesian Optimization with {len(folds_data)} Walk-Forward Folds ({n_calls} evaluations)...")
 
+    import concurrent.futures
+
     best_params: Optional[dict] = None
     best_train_objective = float("-inf")
     eval_count = 0
-    _loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     # Primary training dataset: latest train fold (or aggregated training portions)
     primary_train_set = folds_data[-1][0] if folds_data else sorted_tokens
 
-    def objective_fn(params):
-        nonlocal eval_count, best_params, best_train_objective
+    def _run_optimizer_thread():
+        nonlocal best_params, best_train_objective, eval_count
 
-        w_vol, w_sm, w_fee, threshold = params
-        eval_count += 1
+        def objective_fn(params):
+            nonlocal eval_count, best_params, best_train_objective
 
-        w_dict = {"vol_velocity": w_vol, "smart_money": w_sm, "global_fee": w_fee}
+            w_vol, w_sm, w_fee, w_holder, w_social, threshold = params
+            eval_count += 1
 
-        # Evaluate on Training set
-        train_metrics = _loop.run_until_complete(
-            run_replay_on_tokens(primary_train_set, opportunity_threshold=threshold, weight_overrides=w_dict)
+            w_dict = {
+                "vol_velocity": w_vol,
+                "smart_money": w_sm,
+                "global_fee": w_fee,
+                "holder_curve": w_holder,
+                "social_meta": w_social
+            }
+
+            # Safely evaluate coroutine from thread on the main event loop
+            future = asyncio.run_coroutine_threadsafe(
+                run_replay_on_tokens(primary_train_set, opportunity_threshold=threshold, weight_overrides=w_dict),
+                loop
+            )
+            train_metrics = future.result()
+
+            obj = train_metrics.ev_per_trade + 0.5 * (train_metrics.filter_precision * 100.0)
+
+            if obj > best_train_objective:
+                best_train_objective = obj
+                best_params = {
+                    "weight_vol_velocity": round(w_vol, 4),
+                    "weight_smart_money": round(w_sm, 4),
+                    "weight_global_fee": round(w_fee, 4),
+                    "weight_holder_curve": round(w_holder, 4),
+                    "weight_social_meta": round(w_social, 4),
+                    "opportunity_threshold": round(threshold, 2)
+                }
+                logger.info(
+                    f"✨ [Eval {eval_count}/{n_calls}] New Best Train EV: {train_metrics.ev_per_trade:+.2f}% | "
+                    f"Precision: {train_metrics.filter_precision:.1%} | Params: {best_params}"
+                )
+
+            return -obj
+
+        search_space = _get_search_space()
+        return gp_minimize(
+            objective_fn,
+            search_space,
+            n_calls=n_calls,
+            n_initial_points=min(8, max(4, n_calls // 4)),
+            acq_func="EI",
+            random_state=42
         )
 
-        obj = train_metrics.ev_per_trade + 0.5 * (train_metrics.filter_precision * 100.0)
-
-        if obj > best_train_objective:
-            best_train_objective = obj
-            best_params = {
-                "weight_vol_velocity": round(w_vol, 4),
-                "weight_smart_money": round(w_sm, 4),
-                "weight_global_fee": round(w_fee, 4),
-                "opportunity_threshold": round(threshold, 2)
-            }
-            logger.info(
-                f"✨ [Eval {eval_count}/{n_calls}] New Best Train EV: {train_metrics.ev_per_trade:+.2f}% | "
-                f"Precision: {train_metrics.filter_precision:.1%} | Params: {best_params}"
-            )
-
-        return -obj
-
-    # Gaussian Process Optimization on Train Data
-    gp_result = gp_minimize(
-        objective_fn,
-        SEARCH_SPACE,
-        n_calls=n_calls,
-        n_initial_points=min(8, max(4, n_calls // 4)),
-        acq_func="EI",
-        random_state=42
-    )
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        gp_result = await loop.run_in_executor(pool, _run_optimizer_thread)
 
     # 4. Rigorous Out-of-Sample Evaluation on all Walk-Forward Test Folds
     logger.info("🛡️ Evaluating Best Parameters on Out-of-Sample Test Folds...")
@@ -124,6 +150,7 @@ async def run_bayesian_optimization(
         weight_overrides=best_params,
         n_splits=n_splits
     )
+
 
     # Save final run result to Supabase
     fold_details = [

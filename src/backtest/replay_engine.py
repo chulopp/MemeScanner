@@ -178,4 +178,30 @@ async def run_replay(
         f"EV/Trade={metrics.ev_per_trade:+.2f}% | "
         f"EV Positive: {'✅' if metrics.ev_positive else '❌'}"
     )
+
+    # Persist single run record for reporter
+    run_record = {
+        "dataset_size": metrics.dataset_size,
+        "runner_count": metrics.runner_count,
+        "dead_count": metrics.dead_count,
+        "neutral_count": metrics.neutral_count,
+        "params": {
+            "opportunity_threshold": opportunity_threshold,
+            **(weight_overrides or {})
+        },
+        "filter_precision": metrics.filter_precision,
+        "opportunity_recall": metrics.opportunity_recall,
+        "ev_per_trade": metrics.ev_per_trade,
+        "oos_ev_per_trade": metrics.ev_per_trade,
+        "oos_filter_precision": metrics.filter_precision,
+        "oos_opportunity_recall": metrics.opportunity_recall,
+        "is_optimal": False,
+        "notes": f"Single Replay Baseline (threshold={opportunity_threshold})"
+    }
+    try:
+        await db_manager.insert("backtest_runs", run_record)
+    except Exception as e:
+        logger.debug(f"Failed to persist replay run: {e}")
+
     return metrics
+

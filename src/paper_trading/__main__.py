@@ -61,14 +61,30 @@ async def _cmd_evaluate(window: str) -> None:
     await evaluate_paper_trading(window=window)
 
 
-async def _cmd_portfolio(balance: float, risk_pct: float, source: str) -> None:
+async def _cmd_portfolio(balance: float, risk_pct: float, source: str, apply_filter: bool = True, threshold: float = 40.0) -> None:
     """Run Virtual Portfolio & Multi-Exit Simulation."""
     from src.paper_trading.portfolio_simulator import portfolio_simulator
+    from src.backtest.replay_engine import _offline_safety_check, _build_raw_token_event
+    from src.opportunity.scorer import opportunity_scorer
     await db_manager.initialize()
 
     signals: list[dict] = []
     if source == "backtest":
-        signals = await db_manager.query("backtest_tokens", limit=1000)
+        raw_tokens = await db_manager.query("backtest_tokens", filters={"label": "not.is.null"}, limit=1000)
+        if apply_filter:
+            for row in raw_tokens:
+                passed, _ = _offline_safety_check(row)
+                if passed:
+                    event = _build_raw_token_event(row)
+                    if event:
+                        try:
+                            score_res = await opportunity_scorer.score_token(event)
+                            if score_res.opportunity_score >= threshold:
+                                signals.append(row)
+                        except Exception:
+                            signals.append(row)
+        else:
+            signals = raw_tokens
     else:
         # Default to paper signals
         paper_sigs = await db_manager.query("paper_signals", limit=1000)
@@ -97,8 +113,8 @@ async def _cmd_portfolio(balance: float, risk_pct: float, source: str) -> None:
             signals.append(sig_copy)
 
     if not signals:
-        print(f"\nℹ️  No data found in '{source}'.")
-        print("   If testing, collect data first or run backtest.")
+        print(f"\nℹ️  No qualified trade signals found in '{source}' (threshold={threshold}).")
+        print("   Semua token disaring oleh safety filter atau skor di bawah threshold.")
         return
 
     milestones = portfolio_simulator.calculate_milestones(signals)
@@ -115,6 +131,7 @@ async def _cmd_portfolio(balance: float, risk_pct: float, source: str) -> None:
         position_risk_pct=risk_pct
     )
     print("\n" + report_str + "\n")
+
 
 
 def main() -> None:
@@ -138,6 +155,8 @@ def main() -> None:
     p_port.add_argument("--risk", type=float, default=20.0, help="Position sizing risk % per trade (default: 20.0)")
     p_port.add_argument("--source", type=str, default="paper", choices=["paper", "backtest"],
                         help="Data source: 'paper' or 'backtest' (default: paper)")
+    p_port.add_argument("--threshold", type=float, default=40.0, help="Opportunity score threshold when using backtest source (default: 40.0)")
+    p_port.add_argument("--unfiltered", action="store_true", help="Simulate blind trading without safety filters")
 
     args = parser.parse_args()
 
@@ -146,7 +165,9 @@ def main() -> None:
     elif args.command == "evaluate":
         asyncio.run(_cmd_evaluate(args.window))
     elif args.command == "portfolio":
-        asyncio.run(_cmd_portfolio(args.balance, args.risk, args.source))
+        apply_filter = not args.unfiltered
+        asyncio.run(_cmd_portfolio(args.balance, args.risk, args.source, apply_filter=apply_filter, threshold=args.threshold))
+
 
 
 if __name__ == "__main__":

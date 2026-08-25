@@ -61,8 +61,9 @@ async def _cmd_evaluate(window: str) -> None:
     await evaluate_paper_trading(window=window)
 
 
-async def _cmd_portfolio(balance: float, risk_pct: float, source: str, apply_filter: bool = True, threshold: float = 40.0) -> None:
+async def _cmd_portfolio(balance: float, risk_pct: float, source: str, apply_filter: bool = True, threshold: float = 60.0) -> None:
     """Run Virtual Portfolio & Multi-Exit Simulation."""
+
     from src.paper_trading.portfolio_simulator import portfolio_simulator
     from src.backtest.replay_engine import _offline_safety_check, _build_raw_token_event
     from src.opportunity.scorer import opportunity_scorer
@@ -152,11 +153,12 @@ def main() -> None:
     # portfolio
     p_port = subparsers.add_parser("portfolio", help="Run Virtual Portfolio & Multi-Exit Strategy Simulator")
     p_port.add_argument("--balance", type=float, default=10.0, help="Initial capital in USD (default: 10.0)")
-    p_port.add_argument("--risk", type=float, default=20.0, help="Position sizing risk % per trade (default: 20.0)")
+    p_port.add_argument("--risk", type=float, default=2.0, help="Position sizing risk % per trade (default: 2.0)")
     p_port.add_argument("--source", type=str, default="paper", choices=["paper", "backtest"],
                         help="Data source: 'paper' or 'backtest' (default: paper)")
-    p_port.add_argument("--threshold", type=float, default=40.0, help="Opportunity score threshold when using backtest source (default: 40.0)")
+    p_port.add_argument("--threshold", type=float, default=60.0, help="Opportunity score threshold when using backtest source (default: 60.0)")
     p_port.add_argument("--unfiltered", action="store_true", help="Simulate blind trading without safety filters")
+
 
     args = parser.parse_args()
 

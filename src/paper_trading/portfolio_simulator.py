@@ -125,11 +125,12 @@ class PortfolioSimulator:
         tp_target_pct: float,
         sl_target_pct: float,
         initial_balance: float = 10.0,
-        position_risk_pct: float = 20.0
+        position_risk_pct: float = 2.0
     ) -> StrategyMatrixResult:
         """
-        Simulates a specific (TP, SL) strategy on chronological signals with 20% compounding balance.
+        Simulates a specific (TP, SL) strategy on chronological signals with 2% fixed fractional balance.
         """
+
         balance = initial_balance
         peak_balance = initial_balance
         max_drawdown_pct = 0.0
@@ -237,7 +238,7 @@ class PortfolioSimulator:
         self,
         signals: list[dict[str, Any]],
         initial_balance: float = 10.0,
-        position_risk_pct: float = 20.0,
+        position_risk_pct: float = 2.0,
         tp_grid: Optional[list[float]] = None,
         sl_grid: Optional[list[float]] = None
     ) -> list[StrategyMatrixResult]:
@@ -268,7 +269,7 @@ class PortfolioSimulator:
         matrix_results: list[StrategyMatrixResult],
         milestones: list[MilestoneHitRate],
         initial_balance: float = 10.0,
-        position_risk_pct: float = 20.0
+        position_risk_pct: float = 2.0
     ) -> str:
         """
         Generates a formatted ASCII terminal report for CLI visualization.
@@ -276,8 +277,9 @@ class PortfolioSimulator:
         lines = []
         lines.append("=" * 82)
         lines.append("📊 MEMESCANNER — VIRTUAL PORTFOLIO & MULTI-EXIT SIMULATION REPORT")
-        lines.append(f"💰 Initial Capital: ${initial_balance:.2f} | Position Sizing: {position_risk_pct:.0f}% Compounding")
+        lines.append(f"💰 Initial Capital: ${initial_balance:.2f} | Position Sizing: {position_risk_pct:.1f}% Fixed Fractional")
         lines.append("=" * 82)
+
 
         # 1. Milestone Distribution Section
         lines.append("\n🎯 [1] MILESTONE HIT-RATE DISTRIBUTION (% Token Mencapai Target)")

@@ -38,11 +38,12 @@ def _offline_safety_check(row: dict) -> tuple[bool, Optional[str]]:
     if liquidity_usd < 1_000.0:
         return False, "OFFLINE:ZERO_LIQUIDITY"
 
-    # Reject if 24h volume >> liquidity (wash trade proxy) — HYPOTHESIS_INIT
-    if volume_24h > 0 and (volume_24h / max(liquidity_usd, 1)) > 50.0:
+    # Reject if 24h volume >> liquidity (wash trade proxy) — threshold relaxed to 300.0x to allow viral runners
+    if volume_24h > 0 and (volume_24h / max(liquidity_usd, 1.0)) > 300.0:
         return False, "OFFLINE:WASH_TRADE_PROXY"
 
     return True, None
+
 
 
 def _build_raw_token_event(row: dict) -> Optional[RawTokenEvent]:

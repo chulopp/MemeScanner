@@ -353,8 +353,8 @@ class DatabaseManager:
             try:
                 loop = asyncio.get_running_loop()
 
-                def _run():
-                    q = self._client.table(table).select(select).limit(limit)
+                def _fetch_page(offset: int, chunk_size: int):
+                    q = self._client.table(table).select(select)
                     if filters:
                         for col, val in filters.items():
                             if val.startswith("not.is.null"):
@@ -369,13 +369,30 @@ class DatabaseManager:
                                 q = q.gte(col, val[4:])
                             elif val.startswith("lte."):
                                 q = q.lte(col, val[4:])
+                    q = q.range(offset, offset + chunk_size - 1)
                     return q.execute()
 
-                response = await loop.run_in_executor(None, _run)
-                return response.data or []
+                all_rows = []
+                remaining = limit
+                offset = 0
+
+                while remaining > 0:
+                    chunk_size = min(remaining, 1000)
+                    response = await loop.run_in_executor(None, lambda o=offset, c=chunk_size: _fetch_page(o, c))
+                    data = response.data or []
+                    if not data:
+                        break
+                    all_rows.extend(data)
+                    offset += len(data)
+                    remaining -= len(data)
+                    if len(data) < chunk_size:
+                        break  # Reached end of table
+
+                return all_rows
             except Exception as e:
                 logger.debug(f"Supabase generic query error on '{table}': {e}")
         return []
+
 
     async def insert(self, table: str, row: dict) -> bool:
         """Generic insert for any table. Returns True on success."""

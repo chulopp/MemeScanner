@@ -71,7 +71,8 @@ async def _cmd_portfolio(balance: float, risk_pct: float, source: str, apply_fil
 
     signals: list[dict] = []
     if source == "backtest":
-        raw_tokens = await db_manager.query("backtest_tokens", filters={"label": "not.is.null"}, limit=1000)
+        raw_tokens = await db_manager.query("backtest_tokens", filters={"label": "not.is.null"}, limit=5000)
+
         if apply_filter:
             for row in raw_tokens:
                 passed, _ = _offline_safety_check(row)

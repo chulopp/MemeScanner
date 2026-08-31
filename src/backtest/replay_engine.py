@@ -1,5 +1,5 @@
 """
-Replay Engine — Fase 4
+Replay Engine — Fase 4 & B
 Feeds historical tokens from `backtest_tokens` through the existing
 scoring engines in offline mode (no live RPC calls for filters).
 
@@ -7,6 +7,10 @@ RPC-dependent filter steps (deployer history, ATA resolution, bundling graph)
 are skipped in offline mode — this is a known limitation documented in the report.
 The safety check is simplified: only static threshold checks available from
 DexScreener data (liquidity thresholds, volume proxy checks).
+
+Fase B (R9): Reads `price_usd_at_t2` column from backtest_tokens.
+If available, recalculates return from T+2 entry price instead of T=0.
+If unavailable, sets t0_fallback=True on the signal — gate uses T+2 only.
 """
 
 import asyncio
@@ -59,15 +63,22 @@ def _build_raw_token_event(row: dict) -> Optional[RawTokenEvent]:
         else:
             ts = datetime.now(tz=timezone.utc)
 
+        deployer = row.get("deployer_wallet_address") or raw.get("traderPublicKey") or "OFFLINE_BACKTEST_PLACEHOLDER"
+        v_sol = float(raw.get("vSolInBondingCurve", 30.0)) if raw.get("vSolInBondingCurve") else 30.0
+        init_buy = float(raw.get("initialBuy", 0.0)) if raw.get("initialBuy") else 0.0
+
         return RawTokenEvent(
             token_address=token_address,
             symbol=(row.get("symbol") or base_token.get("symbol") or "UNKNOWN")[:20],
             name=(row.get("name") or base_token.get("name") or "")[:60],
-            deployer_wallet_address="OFFLINE_BACKTEST_PLACEHOLDER",
+            deployer_wallet_address=deployer,
             launch_venue=row.get("launch_venue", "pump_fun"),
-            initial_buy_amount=0.0,
+            initial_buy_amount=init_buy,
             total_supply=1_000_000_000.0,
-            timestamp=ts
+            initial_sol_liquidity=v_sol,
+            bonding_curve_address=raw.get("bondingCurveKey"),
+            timestamp=ts,
+            raw_payload=raw
         )
     except Exception as e:
         logger.debug(f"Failed to reconstruct event for {row.get('token_address', '?')[:8]}: {e}")
@@ -111,6 +122,18 @@ async def run_replay_on_tokens(
         label_return_pct = row.get("label_return_pct", 0.0) or 0.0
         liquidity_usd = row.get("liquidity_usd", 0.0) or 0.0
 
+        # --- Fase B (R9): T+2 EV computation ---
+        # Read T+2 price captured by data_collector at T=0+120s
+        price_t2 = row.get("price_usd_at_t2")
+        price_24h = row.get("price_usd_24h") or row.get("price_24h_usd")
+        t0_fallback = price_t2 is None
+
+        # If T+2 price exists AND we have 24h price, recalculate return from T+2 entry
+        # Otherwise label_return_pct_t2 = None (explicitly, don't fake it with T=0 data)
+        label_return_pct_t2: Optional[float] = None
+        if price_t2 and price_t2 > 0 and price_24h and price_24h > 0:
+            label_return_pct_t2 = ((price_24h - price_t2) / price_t2) * 100.0
+
         # --- Offline Safety Check ---
         passed_safety, rejection_reason = _offline_safety_check(row)
 
@@ -139,7 +162,9 @@ async def run_replay_on_tokens(
             label_return_pct=label_return_pct,
             liquidity_usd=liquidity_usd,
             total_cost_pct=trade_cost.total_cost_pct,
-            rejection_reason=rejection_reason
+            rejection_reason=rejection_reason,
+            label_return_pct_t2=label_return_pct_t2,
+            t0_fallback=t0_fallback,
         ))
 
     return compute_metrics(signals, opportunity_threshold)

@@ -1,0 +1,713 @@
+{
+  "token_address": "3TkLvpVAUMNgNUaprLTbwmNexmc42GmqNbLqw7Vmpump",
+  "symbol": "GIPP",
+  "label": "dead",
+  "label_return_pct": -100,
+  "priority_fees_micro_lamports": [
+    1641000,
+    71768000,
+    71768000,
+    71768000,
+    71768000,
+    20000000,
+    62194000,
+    15000000,
+    69767000,
+    69767000,
+    300000000,
+    79259000,
+    1000000000,
+    35189000,
+    68868000,
+    286000,
+    486000,
+    382000,
+    65566000,
+    2027000,
+    134000,
+    37762000,
+    132000,
+    164000,
+    137000,
+    2124000,
+    1000000000,
+    4088000,
+    79000,
+    35000,
+    2003000,
+    133000,
+    2082000,
+    13239000,
+    900000,
+    63845000,
+    96000,
+    640000,
+    130000,
+    644000,
+    332000,
+    1561000,
+    2014000,
+    25277000,
+    328000,
+    10000000,
+    561000,
+    404000,
+    34452000,
+    494000,
+    147000,
+    97000,
+    96000,
+    1000000000,
+    1994000,
+    61000,
+    21631000,
+    100000000,
+    38000,
+    2021000,
+    1000000000,
+    142000,
+    2028000,
+    6310000,
+    145000,
+    146000,
+    537000,
+    1267000,
+    396000,
+    394000,
+    1000000000,
+    2026000,
+    37347000,
+    338000,
+    674000,
+    2127000,
+    25232000,
+    2089000,
+    138000,
+    222000,
+    452000,
+    9500000,
+    100000,
+    60208000,
+    56000,
+    126000,
+    15195000,
+    36000,
+    1993000,
+    138000,
+    6467000,
+    2033000,
+    108000,
+    152000,
+    60098000,
+    60098000,
+    60098000,
+    779000,
+    467000,
+    1118000
+  ],
+  "raw_tx_fees": [
+    {
+      "fee_lamports": 6641,
+      "timestamp": 1787542570,
+      "type": "UNKNOWN",
+      "signature": "yCJD5Ku1EphExcEkDNT4"
+    },
+    {
+      "fee_lamports": 76768,
+      "timestamp": 1787539201,
+      "type": "SWAP",
+      "signature": "5BH9MyEeTGd37zJkaEHW"
+    },
+    {
+      "fee_lamports": 76768,
+      "timestamp": 1787539201,
+      "type": "SWAP",
+      "signature": "5gqN4N9gPM2URgD1tpqu"
+    },
+    {
+      "fee_lamports": 76768,
+      "timestamp": 1787539201,
+      "type": "SWAP",
+      "signature": "56v8r19okSkEw6ZUZNkW"
+    },
+    {
+      "fee_lamports": 76768,
+      "timestamp": 1787539201,
+      "type": "SWAP",
+      "signature": "5HnTnZBHsMqA49HZ1XuN"
+    },
+    {
+      "fee_lamports": 25000,
+      "timestamp": 1787539201,
+      "type": "SWAP",
+      "signature": "2WHssNMkLaqSPb6Sbbiz"
+    },
+    {
+      "fee_lamports": 67194,
+      "timestamp": 1787539181,
+      "type": "SWAP",
+      "signature": "3XFkkkaiNdu9JDpnfcUd"
+    },
+    {
+      "fee_lamports": 20000,
+      "timestamp": 1787539180,
+      "type": "SWAP",
+      "signature": "3aVjBfm6MWuPtobfGBoK"
+    },
+    {
+      "fee_lamports": 74767,
+      "timestamp": 1787539180,
+      "type": "SWAP",
+      "signature": "2kkEFLseMB2evk3Do4ho"
+    },
+    {
+      "fee_lamports": 74767,
+      "timestamp": 1787539180,
+      "type": "SWAP",
+      "signature": "47eu4vJYkBMMQd24rQBQ"
+    },
+    {
+      "fee_lamports": 305000,
+      "timestamp": 1787539180,
+      "type": "TRANSFER",
+      "signature": "38ZsyCHup2giMpPEof1f"
+    },
+    {
+      "fee_lamports": 84259,
+      "timestamp": 1787539172,
+      "type": "SWAP",
+      "signature": "25v9vfnJovDYb9uS9Hvk"
+    },
+    {
+      "fee_lamports": 1005000,
+      "timestamp": 1787539171,
+      "type": "SWAP",
+      "signature": "46rH7LcmervMdMh7WmV4"
+    },
+    {
+      "fee_lamports": 40189,
+      "timestamp": 1787539170,
+      "type": "UNKNOWN",
+      "signature": "y6iNfriwMUMTPBaZziYz"
+    },
+    {
+      "fee_lamports": 73868,
+      "timestamp": 1787539170,
+      "type": "SWAP",
+      "signature": "4DvpmPwN9LxiHGg4owqX"
+    },
+    {
+      "fee_lamports": 5286,
+      "timestamp": 1787539170,
+      "type": "UNKNOWN",
+      "signature": "Uii4vuoQaTbxzT5aPEWK"
+    },
+    {
+      "fee_lamports": 5486,
+      "timestamp": 1787539170,
+      "type": "UNKNOWN",
+      "signature": "Pe8inn5t3nqroaj6n54g"
+    },
+    {
+      "fee_lamports": 5382,
+      "timestamp": 1787539169,
+      "type": "UNKNOWN",
+      "signature": "3pe4hbTpe44ShtMjsfSS"
+    },
+    {
+      "fee_lamports": 70566,
+      "timestamp": 1787539169,
+      "type": "SWAP",
+      "signature": "3CjPPTsJTyLg3xiHxQLE"
+    },
+    {
+      "fee_lamports": 7027,
+      "timestamp": 1787539169,
+      "type": "UNKNOWN",
+      "signature": "4RUyjTGMJrzAGVXsZbDv"
+    },
+    {
+      "fee_lamports": 5134,
+      "timestamp": 1787539169,
+      "type": "UNKNOWN",
+      "signature": "22ztU5hT7ek4hLMbP5q2"
+    },
+    {
+      "fee_lamports": 42762,
+      "timestamp": 1787539169,
+      "type": "UNKNOWN",
+      "signature": "2UNEDCrrkboxUVetRSx2"
+    },
+    {
+      "fee_lamports": 5132,
+      "timestamp": 1787539169,
+      "type": "UNKNOWN",
+      "signature": "2hNW4MsozibNt2ZS3BWW"
+    },
+    {
+      "fee_lamports": 5164,
+      "timestamp": 1787539168,
+      "type": "UNKNOWN",
+      "signature": "3CEAw53jY5bBuiuGsLyN"
+    },
+    {
+      "fee_lamports": 5137,
+      "timestamp": 1787539168,
+      "type": "UNKNOWN",
+      "signature": "SHz5e9xkeLX2qCNKHzqH"
+    },
+    {
+      "fee_lamports": 7124,
+      "timestamp": 1787539168,
+      "type": "UNKNOWN",
+      "signature": "5ZoDsEzqZqb7VTuhEfV9"
+    },
+    {
+      "fee_lamports": 1005000,
+      "timestamp": 1787539168,
+      "type": "SWAP",
+      "signature": "3EbpUWUSABZ1sNPk3P4v"
+    },
+    {
+      "fee_lamports": 9088,
+      "timestamp": 1787539168,
+      "type": "UNKNOWN",
+      "signature": "4vcx7F7tJefyLRU8729S"
+    },
+    {
+      "fee_lamports": 5079,
+      "timestamp": 1787539168,
+      "type": "UNKNOWN",
+      "signature": "5oPCFZ2FVQ99pCwWTLkt"
+    },
+    {
+      "fee_lamports": 5035,
+      "timestamp": 1787539168,
+      "type": "UNKNOWN",
+      "signature": "5fUbxsNfJRoFb7oEDDZF"
+    },
+    {
+      "fee_lamports": 7003,
+      "timestamp": 1787539167,
+      "type": "UNKNOWN",
+      "signature": "ErZmbLNubmfdjQanjVfv"
+    },
+    {
+      "fee_lamports": 5133,
+      "timestamp": 1787539167,
+      "type": "UNKNOWN",
+      "signature": "msBBysSPSENs8mTzDdJv"
+    },
+    {
+      "fee_lamports": 7082,
+      "timestamp": 1787539167,
+      "type": "UNKNOWN",
+      "signature": "2zeb79bfmD25RMLhH9Sr"
+    },
+    {
+      "fee_lamports": 18239,
+      "timestamp": 1787539167,
+      "type": "UNKNOWN",
+      "signature": "2Dxg14dS5NvxtoXa2k2L"
+    },
+    {
+      "fee_lamports": 5900,
+      "timestamp": 1787539167,
+      "type": "SWAP",
+      "signature": "58WJRfJmzBrNQNtX8Lgf"
+    },
+    {
+      "fee_lamports": 68845,
+      "timestamp": 1787539167,
+      "type": "SWAP",
+      "signature": "s9uTT3Bwz7PEcNTZTv3u"
+    },
+    {
+      "fee_lamports": 5096,
+      "timestamp": 1787539167,
+      "type": "UNKNOWN",
+      "signature": "5YUBpYv9WZdPFJxjjiAH"
+    },
+    {
+      "fee_lamports": 5640,
+      "timestamp": 1787539166,
+      "type": "UNKNOWN",
+      "signature": "3NvyJ5w5rtpxkAoEjhTu"
+    },
+    {
+      "fee_lamports": 5130,
+      "timestamp": 1787539166,
+      "type": "UNKNOWN",
+      "signature": "2B2Jregce1XhouNhW933"
+    },
+    {
+      "fee_lamports": 5644,
+      "timestamp": 1787539166,
+      "type": "UNKNOWN",
+      "signature": "5m3oXx8gfPae9TucWdE2"
+    },
+    {
+      "fee_lamports": 5332,
+      "timestamp": 1787539166,
+      "type": "UNKNOWN",
+      "signature": "3ZfDgjZHEznjXfmpyr54"
+    },
+    {
+      "fee_lamports": 6561,
+      "timestamp": 1787539166,
+      "type": "UNKNOWN",
+      "signature": "5fMJQ2TUxYor1pnCgKXh"
+    },
+    {
+      "fee_lamports": 7014,
+      "timestamp": 1787539166,
+      "type": "UNKNOWN",
+      "signature": "3Cfo9nEg3sjr32yWZZgU"
+    },
+    {
+      "fee_lamports": 30277,
+      "timestamp": 1787539166,
+      "type": "UNKNOWN",
+      "signature": "4sxVxFw81g72QFVWAQ3r"
+    },
+    {
+      "fee_lamports": 5328,
+      "timestamp": 1787539165,
+      "type": "UNKNOWN",
+      "signature": "5nDUm5uRdcLnYZaz6aRy"
+    },
+    {
+      "fee_lamports": 15000,
+      "timestamp": 1787539165,
+      "type": "SWAP",
+      "signature": "5YzRfajvHZh5QssMVHdS"
+    },
+    {
+      "fee_lamports": 5561,
+      "timestamp": 1787539165,
+      "type": "UNKNOWN",
+      "signature": "4UgLMaSSMwPnBj8Bcfbv"
+    },
+    {
+      "fee_lamports": 5404,
+      "timestamp": 1787539165,
+      "type": "UNKNOWN",
+      "signature": "3HMknmm9QyxPdoBexjKR"
+    },
+    {
+      "fee_lamports": 39452,
+      "timestamp": 1787539165,
+      "type": "UNKNOWN",
+      "signature": "PDnsPb241p9BMqjCGSRz"
+    },
+    {
+      "fee_lamports": 5494,
+      "timestamp": 1787539164,
+      "type": "UNKNOWN",
+      "signature": "5qSpzPHDZL4jKpvHHdg3"
+    },
+    {
+      "fee_lamports": 5147,
+      "timestamp": 1787539164,
+      "type": "UNKNOWN",
+      "signature": "5fNnP9bTseuW6JADPR72"
+    },
+    {
+      "fee_lamports": 5097,
+      "timestamp": 1787539164,
+      "type": "UNKNOWN",
+      "signature": "5s1Xj9SfpLCtKyEMjFDV"
+    },
+    {
+      "fee_lamports": 5096,
+      "timestamp": 1787539164,
+      "type": "UNKNOWN",
+      "signature": "5zUb1161uhCun23gsrQE"
+    },
+    {
+      "fee_lamports": 1005000,
+      "timestamp": 1787539164,
+      "type": "SWAP",
+      "signature": "5utfHesdXsUyCYf1xrkU"
+    },
+    {
+      "fee_lamports": 6994,
+      "timestamp": 1787539164,
+      "type": "UNKNOWN",
+      "signature": "33uVxFv8GX3CTogb1EHi"
+    },
+    {
+      "fee_lamports": 5061,
+      "timestamp": 1787539163,
+      "type": "UNKNOWN",
+      "signature": "HP98v94teoVJz1z3ok9Q"
+    },
+    {
+      "fee_lamports": 26631,
+      "timestamp": 1787539163,
+      "type": "UNKNOWN",
+      "signature": "4u77sGb1DZUJouBV1jXk"
+    },
+    {
+      "fee_lamports": 105000,
+      "timestamp": 1787539163,
+      "type": "TRANSFER",
+      "signature": "2Kdvpcdb6Wb1EESe9amz"
+    },
+    {
+      "fee_lamports": 5038,
+      "timestamp": 1787539163,
+      "type": "UNKNOWN",
+      "signature": "34CM72ag5b8yWt962HTX"
+    },
+    {
+      "fee_lamports": 7021,
+      "timestamp": 1787539163,
+      "type": "UNKNOWN",
+      "signature": "3zz6esDo5WN1LdV3b3nP"
+    },
+    {
+      "fee_lamports": 1005000,
+      "timestamp": 1787539162,
+      "type": "SWAP",
+      "signature": "67N5yv43BZWVfDREcVoF"
+    },
+    {
+      "fee_lamports": 5142,
+      "timestamp": 1787539162,
+      "type": "UNKNOWN",
+      "signature": "u3PvwmNDyRx8GdTWMsoB"
+    },
+    {
+      "fee_lamports": 7028,
+      "timestamp": 1787539162,
+      "type": "UNKNOWN",
+      "signature": "V9s78ptG73sZahD7t3Ln"
+    },
+    {
+      "fee_lamports": 11310,
+      "timestamp": 1787539162,
+      "type": "UNKNOWN",
+      "signature": "3KWdnQk27LW7X4FPSKSE"
+    },
+    {
+      "fee_lamports": 5145,
+      "timestamp": 1787539162,
+      "type": "UNKNOWN",
+      "signature": "M1ivbSqwvMdLt25C1bxU"
+    },
+    {
+      "fee_lamports": 5146,
+      "timestamp": 1787539161,
+      "type": "UNKNOWN",
+      "signature": "42bcURPkpu6bd6ELRQ5x"
+    },
+    {
+      "fee_lamports": 5537,
+      "timestamp": 1787539161,
+      "type": "UNKNOWN",
+      "signature": "5R1PoxgtGusStaQ1qVH9"
+    },
+    {
+      "fee_lamports": 6267,
+      "timestamp": 1787539161,
+      "type": "UNKNOWN",
+      "signature": "4NR8Y7ENNVXajiZ4jp3F"
+    },
+    {
+      "fee_lamports": 5396,
+      "timestamp": 1787539161,
+      "type": "UNKNOWN",
+      "signature": "51WBjrfq3tmynVyLT3xS"
+    },
+    {
+      "fee_lamports": 5394,
+      "timestamp": 1787539161,
+      "type": "UNKNOWN",
+      "signature": "65H4kNJsS442ocKt4U39"
+    },
+    {
+      "fee_lamports": 1005000,
+      "timestamp": 1787539161,
+      "type": "SWAP",
+      "signature": "vJVTVhU5A1waF8UdZ8vZ"
+    },
+    {
+      "fee_lamports": 7026,
+      "timestamp": 1787539161,
+      "type": "UNKNOWN",
+      "signature": "DwMtNxVgYQRPLKWqrecJ"
+    },
+    {
+      "fee_lamports": 42347,
+      "timestamp": 1787539161,
+      "type": "UNKNOWN",
+      "signature": "2rg3nuA56JJzjmLD1zva"
+    },
+    {
+      "fee_lamports": 5338,
+      "timestamp": 1787539160,
+      "type": "UNKNOWN",
+      "signature": "5cE1swwCWWyBnKuKobUi"
+    },
+    {
+      "fee_lamports": 5674,
+      "timestamp": 1787539160,
+      "type": "UNKNOWN",
+      "signature": "4RXrYCiiGUvvLkfLvCdX"
+    },
+    {
+      "fee_lamports": 7127,
+      "timestamp": 1787539160,
+      "type": "UNKNOWN",
+      "signature": "2MHmdWJd6tGC1CkaAWSZ"
+    },
+    {
+      "fee_lamports": 30232,
+      "timestamp": 1787539160,
+      "type": "UNKNOWN",
+      "signature": "2L8zM73jEG4RTGAa33RN"
+    },
+    {
+      "fee_lamports": 7089,
+      "timestamp": 1787539160,
+      "type": "UNKNOWN",
+      "signature": "3GjPiW8BBL8jRrfaYHTt"
+    },
+    {
+      "fee_lamports": 5138,
+      "timestamp": 1787539160,
+      "type": "UNKNOWN",
+      "signature": "4xMkmoZMWFd654xQ5NmA"
+    },
+    {
+      "fee_lamports": 5222,
+      "timestamp": 1787539160,
+      "type": "UNKNOWN",
+      "signature": "4UinnQU7ERRuNvmrsD2E"
+    },
+    {
+      "fee_lamports": 5452,
+      "timestamp": 1787539159,
+      "type": "UNKNOWN",
+      "signature": "4CfF7QpaDu5gcQ1QaBxg"
+    },
+    {
+      "fee_lamports": 14500,
+      "timestamp": 1787539159,
+      "type": "SWAP",
+      "signature": "2bDVkudW7W3YMfQgoj2w"
+    },
+    {
+      "fee_lamports": 5100,
+      "timestamp": 1787539159,
+      "type": "UNKNOWN",
+      "signature": "3UmQcydNkdUcQE2uwUFA"
+    },
+    {
+      "fee_lamports": 65208,
+      "timestamp": 1787539159,
+      "type": "SWAP",
+      "signature": "2rWABFk1NhqSjRKNPhCM"
+    },
+    {
+      "fee_lamports": 5056,
+      "timestamp": 1787539159,
+      "type": "UNKNOWN",
+      "signature": "SKAmH5ScJEtSriGRYtVq"
+    },
+    {
+      "fee_lamports": 5126,
+      "timestamp": 1787539159,
+      "type": "UNKNOWN",
+      "signature": "2EFohh67NVyUa1Qn3oY9"
+    },
+    {
+      "fee_lamports": 20195,
+      "timestamp": 1787539158,
+      "type": "UNKNOWN",
+      "signature": "24nftBVXe6HHgH79RMYi"
+    },
+    {
+      "fee_lamports": 5036,
+      "timestamp": 1787539158,
+      "type": "UNKNOWN",
+      "signature": "5ah8jyggzS8WtckdsQ7r"
+    },
+    {
+      "fee_lamports": 6993,
+      "timestamp": 1787539158,
+      "type": "UNKNOWN",
+      "signature": "2Fbxqfa8dKwkJasERyF4"
+    },
+    {
+      "fee_lamports": 5138,
+      "timestamp": 1787539158,
+      "type": "UNKNOWN",
+      "signature": "3bhD2MXBxY8LXwSZZUt6"
+    },
+    {
+      "fee_lamports": 11467,
+      "timestamp": 1787539158,
+      "type": "UNKNOWN",
+      "signature": "5uz5zpCvgRhcF23gYMw8"
+    },
+    {
+      "fee_lamports": 7033,
+      "timestamp": 1787539158,
+      "type": "UNKNOWN",
+      "signature": "4dBzLqEDqswhVJPSMkP4"
+    },
+    {
+      "fee_lamports": 5108,
+      "timestamp": 1787539157,
+      "type": "UNKNOWN",
+      "signature": "479RJRNKHNrZed8YKhJT"
+    },
+    {
+      "fee_lamports": 5152,
+      "timestamp": 1787539157,
+      "type": "UNKNOWN",
+      "signature": "5nmmqA1sjaW1SkX4cVdx"
+    },
+    {
+      "fee_lamports": 65098,
+      "timestamp": 1787539157,
+      "type": "SWAP",
+      "signature": "2xvgEmyoBh63ioXefnsN"
+    },
+    {
+      "fee_lamports": 65098,
+      "timestamp": 1787539157,
+      "type": "SWAP",
+      "signature": "9aSmHfnqZk4bdyNsRnGQ"
+    },
+    {
+      "fee_lamports": 65098,
+      "timestamp": 1787539157,
+      "type": "SWAP",
+      "signature": "5e5ygUrjEYWdrvyJcKY4"
+    },
+    {
+      "fee_lamports": 5779,
+      "timestamp": 1787539156,
+      "type": "UNKNOWN",
+      "signature": "3zg3XGMG9oaXAHQ855Rd"
+    },
+    {
+      "fee_lamports": 5467,
+      "timestamp": 1787539156,
+      "type": "UNKNOWN",
+      "signature": "cH2HT1sMufaarqHXN1n4"
+    },
+    {
+      "fee_lamports": 6118,
+      "timestamp": 1787539156,
+      "type": "UNKNOWN",
+      "signature": "5fB8vGkB7hHmR6PFGGbz"
+    }
+  ],
+  "total_samples": 100,
+  "capture_method": "helius_enhanced_tx_api",
+  "note": "Historical fee data from Helius Enhanced TX API (R16)."
+}

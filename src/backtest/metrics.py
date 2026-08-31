@@ -1,10 +1,17 @@
 """
-Metrics — Fase 4
+Metrics — Fase 4 & B
 Komputasi tiga metrik evaluasi utama:
 
 1. Filter Precision: % token yang lolos safety filter ternyata bukan rug dalam 24 jam
 2. Opportunity Recall: % runner yang tertangkap di skor ≥ threshold
 3. EV per Trade: rata-rata return bersih (dikurangi cost) untuk token skor ≥ threshold
+
+Fase B (R9/R14):
+- label_return_pct_t2: return dihitung dari harga T+2 entry (gate metric)
+- t0_fallback: True kalau harga T+2 tidak tersedia, fallback ke T=0
+- ev_per_trade_t2: GATE METRIC — hanya dari row yang punya data T+2 asli
+- ev_per_trade_t0_fallback: log-only — dari row yang pakai T=0 fallback
+- t2_coverage_pct: transparansi berapa % signal yang beneran punya data T+2
 """
 
 from dataclasses import dataclass, field
@@ -19,10 +26,13 @@ class BacktestSignal:
     passed_safety: bool
     opportunity_score: float       # 0–100, or None if rejected at safety
     label: str                     # 'runner' | 'dead' | 'neutral'
-    label_return_pct: float        # actual % return at 24h
+    label_return_pct: float        # actual % return at 24h (from T=0 or T+2 fallback)
     liquidity_usd: float
     total_cost_pct: float          # from CostModel
     rejection_reason: Optional[str] = None
+    # Fase B (R9/R14): T+2 EV separation
+    label_return_pct_t2: Optional[float] = None  # Return from T+2 entry price (None if unavailable)
+    t0_fallback: bool = False                     # True if T+2 price unavailable, using T=0 instead
 
 
 @dataclass
@@ -45,9 +55,14 @@ class BacktestMetrics:
     runners_above_threshold: int
     opportunity_recall: float           # runners above threshold / total runners
 
-    # EV
+    # EV (combined: T+2 where available, T=0 fallback otherwise)
     ev_per_trade: float                 # mean(return_pct - cost_pct) for skor ≥ threshold
     ev_positive: bool
+
+    # Fase B (R14): Separated EV metrics
+    ev_per_trade_t2: float = 0.0           # GATE METRIC: EV from rows with real T+2 data only
+    ev_per_trade_t0_fallback: float = 0.0  # LOG-ONLY: EV from T=0 fallback rows (not gate)
+    t2_coverage_pct: float = 0.0           # % of above-threshold signals with real T+2 data
 
     # Detail
     all_signals: list[BacktestSignal] = field(default_factory=list)
@@ -94,13 +109,44 @@ def compute_metrics(
 
     opportunity_recall = len(runners_above) / len(runners) if runners else 0.0
 
-    # --- EV per Trade ---
-    ev_values = [
+    # --- Fase B (R14): Separated T+2 vs T=0 fallback EV ---
+    # Split above-threshold signals by T+2 data availability
+    t2_signals = [
+        s for s in above_threshold
+        if not s.t0_fallback and s.label_return_pct_t2 is not None
+    ]
+    t0_signals = [s for s in above_threshold if s.t0_fallback]
+
+    # GATE METRIC: EV from real T+2 data only (R14)
+    ev_t2_values = [
+        (s.label_return_pct_t2 - s.total_cost_pct)
+        for s in t2_signals
+        if s.label_return_pct_t2 is not None and s.total_cost_pct is not None
+    ]
+    ev_per_trade_t2 = (sum(ev_t2_values) / len(ev_t2_values)) if ev_t2_values else 0.0
+
+    # LOG-ONLY METRIC: EV from T=0 fallback rows (for comparison, NOT gate)
+    ev_t0_values = [
         (s.label_return_pct - s.total_cost_pct)
-        for s in above_threshold
+        for s in t0_signals
         if s.label_return_pct is not None and s.total_cost_pct is not None
     ]
+    ev_per_trade_t0 = (sum(ev_t0_values) / len(ev_t0_values)) if ev_t0_values else 0.0
+
+    # Combined EV (backward compat): T+2 where available, T=0 fallback otherwise
+    ev_values = [
+        (
+            (s.label_return_pct_t2 if not s.t0_fallback and s.label_return_pct_t2 is not None
+             else s.label_return_pct)
+            - s.total_cost_pct
+        )
+        for s in above_threshold
+        if s.total_cost_pct is not None
+    ]
     ev_per_trade = (sum(ev_values) / len(ev_values)) if ev_values else 0.0
+
+    # T+2 coverage transparency
+    t2_coverage = len(t2_signals) / len(above_threshold) if above_threshold else 0.0
 
     return BacktestMetrics(
         dataset_size=total,
@@ -117,5 +163,8 @@ def compute_metrics(
         opportunity_recall=round(opportunity_recall, 4),
         ev_per_trade=round(ev_per_trade, 4),
         ev_positive=ev_per_trade > 0,
+        ev_per_trade_t2=round(ev_per_trade_t2, 4),
+        ev_per_trade_t0_fallback=round(ev_per_trade_t0, 4),
+        t2_coverage_pct=round(t2_coverage, 4),
         all_signals=signals
     )

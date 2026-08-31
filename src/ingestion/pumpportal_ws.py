@@ -40,20 +40,33 @@ class PumpPortalListener:
                             data = json.loads(message)
                             # Parse token event
                             mint = data.get("mint")
-                            if mint:
-                                event = RawTokenEvent(
-                                    token_address=mint,
-                                    symbol=data.get("symbol", "UNKNOWN"),
-                                    name=data.get("name", "Unknown Token"),
-                                    deployer_wallet_address=data.get("traderPublicKey"),
-                                    launch_venue="pump_fun",
-                                    initial_buy_amount=float(data.get("initialBuy", 0.0)),
-                                    total_supply=1_000_000_000.0,
-                                    initial_sol_liquidity=float(data.get("vSolInBondingCurve", 30.0)),
-                                    bonding_curve_address=data.get("bondingCurveKey"),
-                                    raw_payload=data
-                                )
-                                asyncio.create_task(self.on_token_callback(event))
+                            if not mint:
+                                continue
+
+                            # Strict vanity & spoofing filter: All valid pump.fun tokens end with 'pump'
+                            if not mint.endswith("pump"):
+                                logger.debug(f"Skipping non-pump mint from PumpPortal stream: {mint}")
+                                continue
+
+                            initial_buy = float(data.get("initialBuy", 0.0))
+                            # Reject tokens where creator snipes > 20% (200M of 1B) immediately on birth
+                            if initial_buy > 200_000_000.0:
+                                logger.debug(f"Skipping token {mint[:8]} with suspicious dev initial buy ({initial_buy:,.0f} tokens)")
+                                continue
+
+                            event = RawTokenEvent(
+                                token_address=mint,
+                                symbol=data.get("symbol", "UNKNOWN"),
+                                name=data.get("name", "Unknown Token"),
+                                deployer_wallet_address=data.get("traderPublicKey"),
+                                launch_venue="pump_fun",
+                                initial_buy_amount=initial_buy,
+                                total_supply=1_000_000_000.0,
+                                initial_sol_liquidity=float(data.get("vSolInBondingCurve", 30.0)),
+                                bonding_curve_address=data.get("bondingCurveKey"),
+                                raw_payload=data
+                            )
+                            asyncio.create_task(self.on_token_callback(event))
                         except Exception as parse_err:
                             logger.debug(f"Error parsing PumpPortal message: {parse_err}")
 

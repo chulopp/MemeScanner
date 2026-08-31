@@ -138,6 +138,76 @@ class SolanaRpcClient:
         age_seconds = time.time() - block_time
         return age_seconds / 86400.0
 
+    async def get_bonding_curve_price(self, bc_address: str) -> Optional[dict]:
+        """
+        Reads pump.fun bonding curve account state and calculates current token price.
+
+        Pump.fun BondingCurveAccount struct layout (Anchor IDL, little-endian):
+          Offset 0:   discriminator     (u64, 8 bytes)  — skip
+          Offset 8:   virtualTokenReserves (u64, 8 bytes)
+          Offset 16:  virtualSolReserves   (u64, 8 bytes) — in lamports
+          Offset 24:  realTokenReserves    (u64, 8 bytes)
+          Offset 32:  realSolReserves      (u64, 8 bytes) — in lamports
+          Offset 40:  tokenTotalSupply     (u64, 8 bytes)
+          Offset 48:  complete             (bool, 1 byte)
+
+        Returns dict with parsed fields + price_sol, or None if unavailable.
+        """
+        # Must request base64 encoding — jsonParsed is not available for custom programs
+        res = await self._rpc_call(
+            "getAccountInfo",
+            [bc_address, {"encoding": "base64"}]
+        )
+        if not res or not res.get("value"):
+            return None
+
+        account_data = res["value"].get("data")
+        if not account_data or not isinstance(account_data, list) or len(account_data) < 1:
+            return None
+
+        # Decode base64 → raw bytes
+        try:
+            raw_bytes = base64.b64decode(account_data[0])
+        except Exception as e:
+            logger.debug(f"Failed to decode BC account data for {bc_address[:8]}: {e}")
+            return None
+
+        # Minimum struct size: 8+8+8+8+8+8+1 = 49 bytes
+        if len(raw_bytes) < 49:
+            logger.debug(
+                f"BC account data too short for {bc_address[:8]}: "
+                f"{len(raw_bytes)} bytes (need ≥49)"
+            )
+            return None
+
+        # Parse u64 fields (little-endian unsigned 64-bit)
+        virtual_token_reserves = struct.unpack_from("<Q", raw_bytes, 8)[0]
+        virtual_sol_reserves = struct.unpack_from("<Q", raw_bytes, 16)[0]
+        real_token_reserves = struct.unpack_from("<Q", raw_bytes, 24)[0]
+        real_sol_reserves = struct.unpack_from("<Q", raw_bytes, 32)[0]
+        token_total_supply = struct.unpack_from("<Q", raw_bytes, 40)[0]
+        is_complete = bool(raw_bytes[48])
+
+        # Guard against divide-by-zero
+        if virtual_token_reserves == 0:
+            return None
+
+        # Price calculation:
+        # virtual_sol_reserves is in lamports (÷ 1e9 → SOL)
+        # virtual_token_reserves is in raw token units (pump.fun tokens have 6 decimals → ÷ 1e6)
+        # price_sol = SOL per token
+        price_sol = (virtual_sol_reserves / 1e9) / (virtual_token_reserves / 1e6)
+
+        return {
+            "virtual_token_reserves": virtual_token_reserves,
+            "virtual_sol_reserves": virtual_sol_reserves,
+            "real_token_reserves": real_token_reserves,
+            "real_sol_reserves": real_sol_reserves,
+            "token_total_supply": token_total_supply,
+            "is_complete": is_complete,
+            "price_sol": price_sol,
+        }
+
     async def get_recent_prioritization_fees(self, addresses: Optional[list[str]] = None) -> list[int]:
         """
         Returns list of recent prioritization fees in micro-lamports.

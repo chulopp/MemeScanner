@@ -77,21 +77,14 @@ class FilterPipeline:
                     if result.rejection_reason else bundle_reason
                 )
 
-        # --- Phase 3: Multi-Factor Opportunity Scoring & Snapshot ---
+        # --- Phase 3: Enqueue for Stage 2 Delayed Evaluation (T+2 min) [Fase B] ---
         if result.filter_pass:
-            logger.info(f"📊 Evaluating Multi-Factor Opportunity Score for {event.symbol} ({event.token_address[:8]}...)...")
-            score_res: OpportunityScoreResult = await opportunity_scorer.score_token(
-                event=event,
-                candidate_wallets=list(set(candidate_wallets))
-            )
-
-            result.opportunity_score = score_res.opportunity_score
-            result.opportunity_breakdown = score_res.breakdown
-            result.raw_check_data["opportunity_breakdown"] = score_res.breakdown
-            result.raw_check_data["weights_used"] = score_res.weights_used
-
-            if score_res.metric_snapshot:
-                await db_manager.insert_metric_snapshot(score_res.metric_snapshot)
+            try:
+                from src.paper_trading.delayed_evaluator import delayed_evaluator
+                await delayed_evaluator.enqueue(event, result)
+                logger.info(f"⏱️  [Stage 1] {event.symbol} passed safety → enqueued for T+2 scoring")
+            except Exception as de_err:
+                logger.warning(f"Failed to enqueue {event.symbol} to delayed_evaluator: {de_err}")
 
         # 1. Update Token status in Database
         new_status = "PASSED_SAFETY" if result.filter_pass else "REJECTED"
@@ -118,10 +111,9 @@ class FilterPipeline:
 
         # 3. Log outcome visually
         if result.filter_pass:
-            opp_display = f" | [bold yellow]Opp Score: {result.opportunity_score:.1f}/100[/bold yellow]" if result.opportunity_score is not None else ""
             logger.info(
-                f"✅ [bold green]PASSED SAFETY[/bold green]: {event.symbol} | "
-                f"Dev Buy: {result.dev_holding_pct:.1f}% | Top10: {result.top10_holder_pct:.1f}% | Venue: {event.launch_venue}{opp_display}"
+                f"✅ [bold green]PASSED SAFETY (Stage 1)[/bold green]: {event.symbol} | "
+                f"Dev Buy: {result.dev_holding_pct:.1f}% | Top10: {result.top10_holder_pct:.1f}% | Venue: {event.launch_venue} | Queued for T+2 Scoring"
             )
         else:
             logger.warning(
@@ -136,36 +128,8 @@ class FilterPipeline:
             except Exception as cb_err:
                 logger.error(f"Error in filter result callback: {cb_err}")
 
-        # 5. Paper Trading — Fase 5: Record signal or baseline
-        try:
-            from src.paper_trading.signal_recorder import record_signal
-            from src.paper_trading.outcome_worker import outcome_worker
-            from src.config import settings as app_settings
-            from datetime import datetime, timezone
-
-            if result.filter_pass:
-                signal_id = await record_signal(event, result)
-
-                # Schedule outcome resolution if above threshold
-                if signal_id and result.opportunity_score and result.opportunity_score >= app_settings.opportunity_threshold:
-                    price_snap = None
-                    try:
-                        from src.paper_trading.price_fetcher import fetch_price
-                        price_snap = await fetch_price(event.token_address)
-                    except Exception:
-                        pass
-                    entry_price = price_snap.price_usd if price_snap else 0.0
-                    await outcome_worker.schedule_signal(
-                        signal_id=signal_id,
-                        signal_at=datetime.now(tz=timezone.utc),
-                        entry_price=entry_price,
-                        mint=event.token_address,
-                        symbol=event.symbol or "UNKNOWN"
-                    )
-        except ImportError:
-            pass  # Paper trading module not yet installed
-        except Exception as pt_err:
-            logger.debug(f"Paper trading recording error: {pt_err}")
+        # NOTE: Signal recording (paper_signals table) happens in Stage 2 (delayed_evaluator._process_token)
+        # after the T+2 wait — NOT here in Stage 1. This prevents double-recording every token.
 
         return result
 

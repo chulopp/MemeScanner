@@ -29,6 +29,7 @@ from src.utils.price_feed import price_feed
 from src.utils.logger import logger, console, print_token_table, mask_url
 from src.utils.solana_rpc import solana_rpc
 from src.paper_trading.outcome_worker import outcome_worker
+from src.paper_trading.delayed_evaluator import delayed_evaluator
 from src.paper_trading import price_fetcher as pt_price_fetcher
 
 
@@ -113,6 +114,13 @@ class MemeScannerApp:
         except Exception as ow_err:
             logger.warning(f"Outcome worker start skipped: {ow_err}")
 
+        # Start Fase B delayed evaluator — background T+2 scoring worker
+        try:
+            await delayed_evaluator.start()
+            logger.info("⏱️  Fase B Delayed Evaluator (T+2 stage) started.")
+        except Exception as de_err:
+            logger.warning(f"Delayed evaluator start skipped: {de_err}")
+
         # Start ingestion listeners
         await self.ingestion_manager.start()
 
@@ -140,6 +148,7 @@ class MemeScannerApp:
         await price_feed.close()
         try:
             await outcome_worker.stop()
+            await delayed_evaluator.stop()
             await pt_price_fetcher.close()
         except Exception:
             pass

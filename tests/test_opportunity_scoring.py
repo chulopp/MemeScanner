@@ -253,13 +253,13 @@ async def test_pipeline_integration_phase3_opportunity_score():
 
     with patch("src.filters.pump_safety.instant_scalp_filter.evaluate", AsyncMock(return_value={"flags_count": 0})):
         with patch("src.filters.pipeline.bundling_engine.evaluate_token_bundling", AsyncMock(return_value=mock_bundling_pass)):
-            with patch("src.filters.pipeline.opportunity_scorer.score_token", AsyncMock(return_value=mock_opp_score)):
+            with patch("src.paper_trading.delayed_evaluator.delayed_evaluator.enqueue", AsyncMock()) as mock_enqueue:
                 with patch("src.database.client.db_manager.insert_metric_snapshot", AsyncMock(return_value=True)):
                     result: SafetyCheckResult = await filter_pipeline.process_token(event)
 
                     assert result.filter_pass is True
-                    assert result.opportunity_score == 82.5
-                    assert "opportunity_breakdown" in result.raw_check_data
+                    mock_enqueue.assert_called_once()
+
 
 
 @pytest.mark.asyncio

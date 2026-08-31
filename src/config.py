@@ -65,7 +65,8 @@ class Settings(BaseSettings):
     global_fee_wash_filter_min_fee: int = Field(default=1000, validation_alias="GLOBAL_FEE_WASH_FILTER_MIN_FEE")  # micro-lamports threshold
 
     # --- Fase 5: Paper Trading & Telegram ---
-    opportunity_threshold: float = Field(default=60.0, validation_alias="OPPORTUNITY_THRESHOLD")  # HYPOTHESIS_INIT
+    opportunity_threshold: float = Field(default=31.0, validation_alias="OPPORTUNITY_THRESHOLD")  # Calibrated Fase C
+
     telegram_bot_token: str = Field(default="", validation_alias="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: str = Field(default="", validation_alias="TELEGRAM_CHAT_ID")
 
@@ -73,6 +74,17 @@ class Settings(BaseSettings):
     deepseek_api_key: str = Field(default="", validation_alias="DEEPSEEK_API_KEY")
     deepseek_base_url: str = Field(default="https://api.deepseek.com", validation_alias="DEEPSEEK_BASE_URL")
     deepseek_model: str = Field(default="deepseek-v4-flash", validation_alias="DEEPSEEK_MODEL")
+
+    # --- Feature Flags (R5, R8 decisions) ---
+    # Disabled by default — enable ONLY after validation gate passes (≥2000 token dataset)
+    enable_bonding_curve_modifier: bool = Field(
+        default=False,
+        validation_alias="ENABLE_BONDING_CURVE_MODIFIER"
+    )
+    enable_wash_trade_penalty: bool = Field(
+        default=False,
+        validation_alias="ENABLE_WASH_TRADE_PENALTY"
+    )
 
 
 settings = Settings()

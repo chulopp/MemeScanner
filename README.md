@@ -53,6 +53,10 @@ MemeScanner/
 │       ├── logger.py          # Rich console logger with URL/API key masking
 │       ├── redis_client.py    # Upstash Redis async manager
 │       └── solana_rpc.py      # Helius RPC client with concurrency semaphore
+├── supabase/                  # Database migrations, DDL schema, and seed data
+│   ├── migrations/            # Version-controlled SQL migration files
+│   ├── seed.sql               # Seed list for verified Smart Money wallets
+│   └── README.md              # Supabase CLI & migration execution guide
 ├── tests/                     # Unit and integration test suite
 ├── PRDERD.md                  # Single source of truth (PRD + ERD documentation)
 ├── requirements.txt           # Python dependencies
@@ -90,6 +94,20 @@ Required keys:
 - `HELIUS_API_KEY`: Helius RPC API key.
 - `UPSTASH_REDIS_REST_URL` & `UPSTASH_REDIS_REST_TOKEN`: Upstash Redis REST credentials.
 - `SUPABASE_URL` & `SUPABASE_SERVICE_KEY`: Supabase project URL and service role secret key.
+
+### 4. Database Setup (Supabase Migrations)
+Apply the SQL migrations to initialize the database schema and seed data:
+```bash
+# Push migrations using Supabase CLI
+npx supabase db push
+
+# Or run the SQL scripts directly in the Supabase Dashboard SQL Editor:
+# 1. supabase/migrations/20260822000001_create_core_schema.sql
+# 2. supabase/migrations/20260823000001_create_backtest_schema.sql
+# 3. supabase/seed.sql
+```
+
+See [supabase/README.md](file:///d:/Fallah%27s%20File/Code/Personal%20Project/MemeScanner/supabase/README.md) for full database management instructions.
 
 ---
 

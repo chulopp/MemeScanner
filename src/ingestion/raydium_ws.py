@@ -1,6 +1,8 @@
 import asyncio
 import json
+import time
 from typing import Callable, Awaitable, Optional
+
 import websockets
 from src.config import settings
 from src.ingestion.schemas import RawTokenEvent
@@ -113,6 +115,18 @@ class RaydiumListener:
 
             if candidate_mints:
                 target_mint = candidate_mints[0]
+
+                # Check token age: reject if the token was minted > 10 minutes ago (old pair/established token)
+                signatures = await solana_rpc.get_signatures_for_address(target_mint, limit=50)
+                if signatures:
+                    oldest_tx = signatures[-1]
+                    block_time = oldest_tx.get("blockTime")
+                    if block_time:
+                        age_seconds = time.time() - block_time
+                        if age_seconds > 600.0:  # Older than 10 minutes
+                            logger.debug(f"Skipping Raydium pool for old token {target_mint[:8]} (age: {age_seconds/60:.1f} mins)")
+                            return
+
                 # Fetch basic mint info
                 mint_info = await solana_rpc.get_mint_info(target_mint)
                 signer = account_keys[0].get("pubkey") if isinstance(account_keys[0], dict) else str(account_keys[0])

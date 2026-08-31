@@ -110,7 +110,13 @@ class OpportunityScorer:
 
         # 2. Smart Money
         if isinstance(smart_res, SmartMoneyMatchResult) and smart_res.is_successful:
-            component_scores["smart_money"] = smart_res.score
+            if smart_res.matched_wallets_count > 0:
+                component_scores["smart_money"] = smart_res.score
+            else:
+                # When no smart money wallets matched, redistribute the 30% weight
+                # across active components so tokens are not penalized -30 points from birth
+                component_scores["smart_money"] = None
+
             breakdown["smart_money"] = {
                 "score": smart_res.score,
                 "matched_count": smart_res.matched_wallets_count,
@@ -119,6 +125,7 @@ class OpportunityScorer:
             }
         else:
             logger.debug(f"Smart money match unavailable for {token_addr[:8]}: {smart_res}")
+
 
         # 3. Global Fee Urgency
         if isinstance(fee_res, GlobalFeeResult) and fee_res.is_successful:

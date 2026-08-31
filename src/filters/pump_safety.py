@@ -6,6 +6,12 @@ from src.database.client import db_manager
 from src.utils.logger import logger
 
 
+# Fase C (Q13): Deployer profiling gate thresholds
+# Reject only when evidence is strong enough to avoid false positives
+DEPLOYER_MIN_LAUNCHES = 3       # Need at least 3 launches before judging
+DEPLOYER_MAX_WIN_RATE = 10.0   # Serial rugger: < 10% win rate
+
+
 class PumpSafetyFilter:
     """Hard safety filter tailored for Pump.fun bonding curve tokens."""
 
@@ -20,14 +26,35 @@ class PumpSafetyFilter:
                 f"Dev initial allocation too high: {dev_buy_pct:.1f}% > {settings.max_dev_buy_pct:.1f}%"
             )
 
-        # 2. Check Deployer Wallet Past Rug History
+        # 2. Check Deployer Wallet Past History (Fase C: win-rate based, not rug count)
         deployer = event.deployer_wallet_address
         if deployer:
-            wallet_record = await db_manager.get_wallet(deployer)
-            if wallet_record and wallet_record.get("rug_count_history", 0) > 0:
-                rejections.append(
-                    f"Deployer has {wallet_record['rug_count_history']} past rug history"
+            try:
+                deployer_profile = await db_manager.query(
+                    "deployer_profiles",
+                    filters={"wallet_address": f"eq.{deployer}"},
+                    limit=1
                 )
+                if deployer_profile:
+                    profile = deployer_profile[0]
+                    total = int(profile.get("total_tokens_launched") or 0)
+                    win_rate_raw = profile.get("win_rate_pct")
+                    win_rate = float(win_rate_raw) if win_rate_raw is not None else 100.0
+                    dead_count = int(profile.get("dead_count") or 0)
+
+
+                    # Gate: reject only when evidence is statistically meaningful
+                    if total >= DEPLOYER_MIN_LAUNCHES and win_rate < DEPLOYER_MAX_WIN_RATE:
+                        rejections.append(
+                            f"Serial rugger: {total} launches, {win_rate:.0f}% win rate, {dead_count} dead"
+                        )
+                        logger.debug(
+                            f"Deployer {deployer[:8]}... flagged: "
+                            f"{total} launches, {win_rate:.1f}% win rate"
+                        )
+            except Exception as e:
+                # Don't block the filter if DB is unavailable
+                logger.debug(f"Deployer profile lookup failed for {deployer[:8]}: {e}")
 
         # 3. Check Instant Scalping Heuristics (Ponyin Rules)
         # Sample deployer as initial top holder

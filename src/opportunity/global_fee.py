@@ -107,8 +107,14 @@ class GlobalFeeUrgencyEngine:
                 normalized_score = 80.0 + min(((median_fee - 50000.0) / 200000.0) * 20.0, 20.0)  # 80 -> 100
 
             # Apply wash trading penalty if >70% transactions had zero/sub-threshold fees
-            if is_wash:
+            # R8: Penalty gated behind feature flag — fee engine still detects, but score not penalized until validated
+            if is_wash and settings.enable_wash_trade_penalty:
                 normalized_score = max(normalized_score * 0.3, 5.0)
+            elif is_wash:
+                logger.debug(
+                    f"⚠️ Wash trade suspected for token but penalty flag disabled "
+                    f"(enable_wash_trade_penalty=False). Score unchanged: {normalized_score:.1f}"
+                )
 
             return GlobalFeeResult(
                 score=round(normalized_score, 2),

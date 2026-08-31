@@ -188,6 +188,7 @@ class RunnerCollector:
 
                 best_change = max(h24, h6)   # best upside (for runner detection)
                 worst_change = min(h24, h6)  # worst drop (for dead detection)
+                multiplier = 1.0 + (best_change / 100.0) if best_change > 0 else 1.0
 
                 is_runner = (
                     best_change >= 100.0         # ≥2x price change
@@ -207,6 +208,105 @@ class RunnerCollector:
             logger.debug(f"DexScreener classify batch error: {e}")
             return []
 
+    EXCLUDED_MINTS = {
+        "So11111111111111111111111111111111111111112",  # WSOL
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+    }
+
+    SEARCH_KEYWORDS = [
+        "pump", "sol", "meme", "ai", "trump", "pepe", "cat", "dog", "wif",
+        "bonk", "moon", "agent", "coin", "degen", "bull", "bear", "inu",
+        "shiba", "crypto", "elon", "war", "usa", "gold", "btc", "eth",
+        "base", "ton", "gpt", "bot", "cult", "based", "chad", "wojak",
+        "frog", "ape", "monkey", "baby", "safe", "rocket", "rich", "gem"
+    ]
+
+    async def _fetch_dex_search(
+        self,
+        client: httpx.AsyncClient,
+        query: str,
+    ) -> list[RunnerToken]:
+        """Search pairs on DexScreener by query keyword and extract runners."""
+        try:
+            resp = await client.get(
+                f"{self.BASE_URL}/latest/dex/search",
+                params={"q": query},
+                timeout=15.0,
+            )
+            if resp.status_code != 200:
+                return []
+            pairs = resp.json().get("pairs") or []
+            runners: dict[str, RunnerToken] = {}
+            for pair in pairs:
+                if pair.get("chainId") != "solana":
+                    continue
+                token_addr = pair.get("baseToken", {}).get("address", "")
+                if not token_addr or token_addr in self.EXCLUDED_MINTS or token_addr in runners:
+                    continue
+
+                price_change = pair.get("priceChange") or {}
+                h24 = float(price_change.get("h24") or 0.0)
+                h6 = float(price_change.get("h6") or 0.0)
+                fdv = float(pair.get("fdv") or 0.0)
+                symbol = pair.get("baseToken", {}).get("symbol", "UNKNOWN")
+
+                created_at = None
+                created_ms = pair.get("pairCreatedAt")
+                if created_ms:
+                    try:
+                        created_at = datetime.fromtimestamp(created_ms / 1000, tz=timezone.utc)
+                    except Exception:
+                        pass
+
+                best_change = max(h24, h6)
+                worst_change = min(h24, h6)
+                multiplier = 1.0 + (best_change / 100.0) if best_change > 0 else 1.0
+
+                is_runner = (
+                    best_change >= 100.0
+                    or fdv >= 100_000
+                )
+                if is_runner:
+                    runners[token_addr] = RunnerToken(
+                        token_address=token_addr,
+                        symbol=symbol,
+                        chain_id="solana",
+                        created_at=created_at,
+                        peak_multiplier=multiplier,
+                        current_fdv_usd=fdv,
+                    )
+            return list(runners.values())
+        except Exception as e:
+            logger.debug(f"DexScreener search '{query}' error: {e}")
+            return []
+
+    async def _fetch_boosts_and_profiles(
+        self,
+        client: httpx.AsyncClient,
+    ) -> list[str]:
+        """Fetch candidate token addresses from boosts and profile endpoints."""
+        candidates = set()
+        endpoints = [
+            f"{self.BASE_URL}/token-boosts/top/v1",
+            f"{self.BASE_URL}/token-boosts/latest/v1",
+            f"{self.BASE_URL}/token-profiles/latest/v1",
+        ]
+        for ep in endpoints:
+            try:
+                resp = await client.get(ep, timeout=15.0)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if isinstance(data, list):
+                        for item in data:
+                            if item.get("chainId") == "solana":
+                                addr = item.get("tokenAddress", "")
+                                if addr and addr not in self.EXCLUDED_MINTS:
+                                    candidates.add(addr)
+            except Exception as e:
+                logger.debug(f"DexScreener {ep} error: {e}")
+        return list(candidates)
+
     async def collect(
         self,
         config: DiscoveryConfig,
@@ -214,68 +314,92 @@ class RunnerCollector:
         progress: Progress,
     ) -> list[RunnerToken]:
         """
-        Collect up to config.max_runners runner tokens from DexScreener.
-        Skips tokens already present in already_traced (checkpoint resume).
+        Collect up to config.max_runners runner tokens from multi-source harvesting:
+          1. Local Supabase backtest_tokens (runners already verified)
+          2. DexScreener boosted & profiled tokens
+          3. DexScreener search keyword sweeps
         """
         task = progress.add_task(
-            "[cyan]Phase 1: Collecting runners from DexScreener...",
+            "[cyan]Phase 1: Collecting runners from multi-source harvester...",
             total=config.max_runners,
         )
 
-        collected: list[RunnerToken] = []
+        collected: dict[str, RunnerToken] = {}
         seen_addresses: set[str] = set(already_traced)
-        page = 0
-        buffer: list[str] = []
+
+        # Source 1: Local backtest database
+        try:
+            db_rows = await db_manager.query(
+                "backtest_tokens",
+                select="token_address,symbol,label,label_return_pct,collected_at",
+                limit=3000,
+            )
+            for row in db_rows:
+                addr = row.get("token_address")
+                if not addr or addr in seen_addresses or addr in self.EXCLUDED_MINTS:
+                    continue
+                ret = float(row.get("label_return_pct") or 0.0)
+                lbl = (row.get("label") or "").lower()
+                if lbl == "runner" or ret >= 100.0:
+                    collected[addr] = RunnerToken(
+                        token_address=addr,
+                        symbol=row.get("symbol") or "UNKNOWN",
+                        chain_id="solana",
+                        created_at=None,
+                        peak_multiplier=1.0 + (ret / 100.0) if ret > 0 else 2.0,
+                        current_fdv_usd=100_000.0,
+                        source="backtest_db",
+                    )
+                    seen_addresses.add(addr)
+                    progress.advance(task)
+                    if len(collected) >= config.max_runners:
+                        break
+        except Exception as e:
+            logger.debug(f"DB runners fetch error: {e}")
 
         async with httpx.AsyncClient(
             headers={"User-Agent": "MemeScanner/1.0"},
             follow_redirects=True,
         ) as client:
-            while len(collected) < config.max_runners:
-                profiles = await self._fetch_latest_profiles(client, page)
-                if not profiles:
-                    logger.debug(f"DexScreener profiles page {page} returned empty. Stopping.")
-                    break
-
-                for profile in profiles:
-                    if profile.get("chainId") != "solana":
-                        continue
-                    addr = profile.get("tokenAddress", "")
-                    if not addr or addr in seen_addresses:
-                        continue
-                    seen_addresses.add(addr)
-                    buffer.append(addr)
-
-                    # Classify when buffer is full
-                    if len(buffer) >= config.dexscreener_batch_size:
-                        runners = await self._classify_token_batch(client, buffer)
-                        for r in runners:
-                            if r.token_address not in already_traced:
-                                collected.append(r)
-                                progress.advance(task)
-                        buffer.clear()
-                        await asyncio.sleep(0.5)
-
-                        if len(collected) >= config.max_runners:
-                            break
-
-                # Flush remaining buffer
-                if buffer and len(collected) < config.max_runners:
-                    runners = await self._classify_token_batch(client, buffer)
+            # Source 2: Boosts and latest profiles
+            if len(collected) < config.max_runners:
+                profile_addrs = await self._fetch_boosts_and_profiles(client)
+                unseen = [a for a in profile_addrs if a not in seen_addresses]
+                for i in range(0, len(unseen), config.dexscreener_batch_size):
+                    batch = unseen[i: i + config.dexscreener_batch_size]
+                    runners = await self._classify_token_batch(client, batch)
                     for r in runners:
-                        if r.token_address not in already_traced:
-                            collected.append(r)
+                        if r.token_address not in seen_addresses and r.token_address not in self.EXCLUDED_MINTS:
+                            collected[r.token_address] = r
+                            seen_addresses.add(r.token_address)
                             progress.advance(task)
-                    buffer.clear()
+                            if len(collected) >= config.max_runners:
+                                break
+                    if len(collected) >= config.max_runners:
+                        break
+                    await asyncio.sleep(0.5)
 
-                page += 1
-                await asyncio.sleep(config.batch_delay_seconds)
+            # Source 3: Search keyword sweeps
+            if len(collected) < config.max_runners:
+                for kw in self.SEARCH_KEYWORDS:
+                    runners = await self._fetch_dex_search(client, kw)
+                    for r in runners:
+                        if r.token_address not in seen_addresses and r.token_address not in self.EXCLUDED_MINTS:
+                            collected[r.token_address] = r
+                            seen_addresses.add(r.token_address)
+                            progress.advance(task)
+                            if len(collected) >= config.max_runners:
+                                break
+                    if len(collected) >= config.max_runners:
+                        break
+                    await asyncio.sleep(config.batch_delay_seconds)
 
-        progress.update(task, completed=min(len(collected), config.max_runners))
+        result = list(collected.values())[: config.max_runners]
+        progress.update(task, completed=len(result))
         console.print(
-            f"  ✓ Found [bold green]{len(collected):,}[/bold green] runner tokens"
+            f"  ✓ Found [bold green]{len(result):,}[/bold green] runner tokens"
         )
-        return collected[: config.max_runners]
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -317,11 +441,17 @@ class EarlyBuyerTracer:
                 return []
 
             txs = resp.json()
-            if not isinstance(txs, list):
+            if not isinstance(txs, list) or not txs:
                 return []
 
             early_buyers: list[EarlyBuyRecord] = []
+            
+            # If created_at wasn't in DexScreener metadata, infer from earliest swap timestamp in txs
             token_launch_ts = token.created_at
+            if not token_launch_ts:
+                valid_timestamps = [t.get("timestamp") for t in txs if t.get("timestamp")]
+                if valid_timestamps:
+                    token_launch_ts = datetime.fromtimestamp(min(valid_timestamps), tz=timezone.utc)
 
             for tx in txs:
                 tx_timestamp = tx.get("timestamp")
@@ -336,8 +466,7 @@ class EarlyBuyerTracer:
                     if entry_seconds < 0 or entry_seconds > config.early_window_seconds:
                         continue
                 else:
-                    # No launch time available — cannot determine if early
-                    continue
+                    entry_seconds = 0
 
                 # Parse buyer wallet
                 fee_payer = tx.get("feePayer", "")

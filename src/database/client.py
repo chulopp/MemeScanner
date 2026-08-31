@@ -446,5 +446,95 @@ class DatabaseManager:
         if not self._connected:
             self.connect()
 
+    # ------------------------------------------------------------------ #
+    # Smart Money Discovery pipeline methods                               #
+    # ------------------------------------------------------------------ #
+
+    async def upsert_discovery_wallet(self, data: dict) -> bool:
+        """
+        Upsert a wallet evaluation result into smart_money_wallets.
+        Used as checkpoint during the qualification pipeline.
+        """
+        if self._connected and self._client:
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None,
+                    lambda: self._client.table("smart_money_wallets")
+                        .upsert(data, on_conflict="wallet_address")
+                        .execute()
+                )
+                return True
+            except Exception as e:
+                logger.debug(f"Supabase upsert smart_money_wallets error: {e}")
+        # In-memory fallback (key on wallet_address)
+        async with self._lock:
+            self._in_memory_smart_money[data.get("wallet_address", "")] = data
+        return True
+
+    async def batch_upsert_discovery_hits(self, rows: list[dict]) -> bool:
+        """
+        Batch upsert early buy hits into smart_money_hits.
+        Handles ON CONFLICT (wallet_address, token_address) DO NOTHING.
+        """
+        if not rows:
+            return True
+        if self._connected and self._client:
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None,
+                    lambda: self._client.table("smart_money_hits")
+                        .upsert(rows, on_conflict="wallet_address,token_address")
+                        .execute()
+                )
+                return True
+            except Exception as e:
+                logger.debug(f"Supabase batch upsert smart_money_hits error: {e}")
+        return True
+
+    async def get_traced_token_addresses(self) -> set[str]:
+        """
+        Returns the set of token_address values already present in smart_money_hits.
+        Used by --resume flag to skip tokens already traced.
+        """
+        if self._connected and self._client:
+            try:
+                loop = asyncio.get_running_loop()
+                resp = await loop.run_in_executor(
+                    None,
+                    lambda: self._client.table("smart_money_hits")
+                        .select("token_address")
+                        .eq("source", "TRACE")
+                        .execute()
+                )
+                if resp.data:
+                    return {row["token_address"] for row in resp.data}
+            except Exception as e:
+                logger.debug(f"Supabase get_traced_token_addresses error: {e}")
+        return set()
+
+    async def get_evaluated_wallet_addresses(self) -> set[str]:
+        """
+        Returns the set of wallet_address values already evaluated in smart_money_wallets.
+        Used by --resume flag to skip wallets already qualified/rejected.
+        """
+        if self._connected and self._client:
+            try:
+                loop = asyncio.get_running_loop()
+                resp = await loop.run_in_executor(
+                    None,
+                    lambda: self._client.table("smart_money_wallets")
+                        .select("wallet_address")
+                        .neq("status", "PENDING")
+                        .execute()
+                )
+                if resp.data:
+                    return {row["wallet_address"] for row in resp.data}
+            except Exception as e:
+                logger.debug(f"Supabase get_evaluated_wallet_addresses error: {e}")
+        return set()
+
 
 db_manager = DatabaseManager()
+

@@ -475,17 +475,28 @@ class DatabaseManager:
     async def batch_upsert_discovery_hits(self, rows: list[dict]) -> bool:
         """
         Batch upsert early buy hits into smart_money_hits.
-        Handles ON CONFLICT (wallet_address, token_address) DO NOTHING.
+        Deduplicates in-memory by (wallet_address, token_address) to prevent
+        Postgres 'ON CONFLICT DO UPDATE command cannot affect row a second time' error.
         """
         if not rows:
             return True
+        # Deduplicate within batch
+        unique_map = {}
+        for r in rows:
+            key = (r.get("wallet_address"), r.get("token_address"))
+            if key[0] and key[1]:
+                unique_map[key] = r
+        deduped_rows = list(unique_map.values())
+        if not deduped_rows:
+            return True
+
         if self._connected and self._client:
             try:
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(
                     None,
                     lambda: self._client.table("smart_money_hits")
-                        .upsert(rows, on_conflict="wallet_address,token_address")
+                        .upsert(deduped_rows, on_conflict="wallet_address,token_address")
                         .execute()
                 )
                 return True

@@ -67,6 +67,10 @@ def parse_args() -> argparse.Namespace:
         help="Seconds after token launch considered 'early' (default: 600 = 10 min)"
     )
     parser.add_argument(
+        "--max-age-hours", type=float, default=48.0,
+        help="Maximum age of runner tokens in hours (default: 48.0 = only fresh tokens <=48h old)"
+    )
+    parser.add_argument(
         "--batch-size", type=int, default=50,
         help="Number of tokens per processing batch (default: 50)"
     )
@@ -99,6 +103,7 @@ async def main() -> None:
         min_sol_balance=args.min_sol,
         min_classifiable_buys=args.min_sample,
         early_window_seconds=args.early_window,
+        max_token_age_hours=args.max_age_hours,
         batch_size=args.batch_size,
     )
 

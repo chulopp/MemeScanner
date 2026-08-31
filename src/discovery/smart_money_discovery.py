@@ -335,6 +335,88 @@ class RunnerCollector:
 
         return fresh_runners
 
+    async def _fetch_raydium_pools(
+        self,
+        client: httpx.AsyncClient,
+        config: DiscoveryConfig,
+        seen_addresses: set[str],
+        max_pools: int = 500,
+    ) -> list[RunnerToken]:
+        """
+        Fetch high-volume active meme pools on Raydium DEX.
+        Filters for pools paired with WSOL having volume24h >= $50,000.
+        """
+        runners: list[RunnerToken] = []
+        wsol_mint = "So11111111111111111111111111111111111111112"
+
+        for page in range(1, 11):  # up to 10 pages * 100 = 1000 pools checked
+            url = (
+                f"https://api-v3.raydium.io/pools/info/list"
+                f"?poolType=all&poolSortField=volume24h&sortType=desc&pageSize=100&page={page}"
+            )
+            try:
+                resp = await client.get(url, timeout=15.0)
+                if resp.status_code != 200:
+                    break
+                data = resp.json().get("data", {})
+                pools = data.get("data", [])
+                if not pools:
+                    break
+
+                for p in pools:
+                    addr_a = p.get("mintA", {}).get("address", "")
+                    addr_b = p.get("mintB", {}).get("address", "")
+                    sym_a = p.get("mintA", {}).get("symbol", "")
+                    sym_b = p.get("mintB", {}).get("symbol", "")
+                    vol_24h = float(p.get("day", {}).get("volume") or 0.0)
+                    tvl = float(p.get("tvl") or 0.0)
+
+                    # Only look at pools with >= $25k 24h volume
+                    if vol_24h < 25_000:
+                        continue
+
+                    # Identify target meme token paired against WSOL
+                    target_mint = None
+                    target_symbol = None
+                    if addr_a == wsol_mint and addr_b not in self.EXCLUDED_MINTS:
+                        target_mint = addr_b
+                        target_symbol = sym_b
+                    elif addr_b == wsol_mint and addr_a not in self.EXCLUDED_MINTS:
+                        target_mint = addr_a
+                        target_symbol = sym_a
+
+                    if not target_mint or target_mint in seen_addresses or target_mint in self.EXCLUDED_MINTS:
+                        continue
+
+                    open_time = p.get("openTime")
+                    created_at = None
+                    if open_time and open_time != "0":
+                        try:
+                            created_at = datetime.fromtimestamp(int(open_time), tz=timezone.utc)
+                        except Exception:
+                            pass
+
+                    runners.append(RunnerToken(
+                        token_address=target_mint,
+                        symbol=target_symbol or "UNKNOWN",
+                        chain_id="solana",
+                        created_at=created_at,
+                        peak_multiplier=2.5,
+                        current_fdv_usd=tvl * 2.0 if tvl > 0 else 100_000.0,
+                        source="raydium_pools",
+                    ))
+                    seen_addresses.add(target_mint)
+
+                    if len(runners) >= max_pools:
+                        return runners
+
+                await asyncio.sleep(0.2)
+            except Exception as e:
+                logger.debug(f"Raydium pool fetch page {page} error: {e}")
+                break
+
+        return runners
+
     async def collect(
         self,
         config: DiscoveryConfig,
@@ -343,12 +425,13 @@ class RunnerCollector:
     ) -> list[RunnerToken]:
         """
         Collect up to config.max_runners runner tokens from FRESH sources:
-          1. Direct pump.fun API: fresh runners (<=48h old, graduated or mcap >= $60k)
-          2. DexScreener live boosts & profiles: fresh Solana runners (<=48h old, >=2x return)
-          3. Local Supabase backtest_tokens (runners already verified in DB)
+          1. Direct pump.fun API: fresh runners (<=168h old, graduated or mcap >= $20k)
+          2. Raydium DEX pools: high-volume active meme pairs on Raydium (>= $25k vol24h)
+          3. DexScreener live boosts & profiles: fresh Solana runners
+          4. Local Supabase backtest_tokens (runners already verified in DB)
         """
         task = progress.add_task(
-            "[cyan]Phase 1: Collecting FRESH runners (<=48h active tokens)...",
+            "[cyan]Phase 1: Collecting FRESH runners (<=168h active tokens)...",
             total=config.max_runners,
         )
 
@@ -368,7 +451,18 @@ class RunnerCollector:
                     if len(collected) >= config.max_runners:
                         break
 
-            # Source 2: DexScreener fresh boosts (active trending runners)
+            # Source 2: Raydium DEX high-volume active pools (expands runner pool to 1000+)
+            if len(collected) < config.max_runners:
+                needed = config.max_runners - len(collected)
+                raydium_runners = await self._fetch_raydium_pools(client, config, seen_addresses, max_pools=needed)
+                for r in raydium_runners:
+                    if r.token_address not in collected:
+                        collected[r.token_address] = r
+                        progress.advance(task)
+                        if len(collected) >= config.max_runners:
+                            break
+
+            # Source 3: DexScreener fresh boosts (active trending runners)
             if len(collected) < config.max_runners:
                 dex_runners = await self._fetch_dex_fresh_boosts(client, config, seen_addresses)
                 for r in dex_runners:
@@ -378,7 +472,7 @@ class RunnerCollector:
                         if len(collected) >= config.max_runners:
                             break
 
-        # Source 3: Fallback / seed from local backtest runners if still needed
+        # Source 4: Fallback / seed from local backtest runners if still needed
         if len(collected) < config.max_runners:
             try:
                 db_rows = await db_manager.query(

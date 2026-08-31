@@ -260,6 +260,13 @@ class DatabaseManager:
         if self._connected and self._client:
             try:
                 loop = asyncio.get_running_loop()
+                # Ensure parent row exists in 'wallets' to satisfy foreign key constraint
+                await loop.run_in_executor(
+                    None,
+                    lambda: self._client.table("wallets")
+                        .upsert({"wallet_address": profile.wallet_address}, on_conflict="wallet_address")
+                        .execute()
+                )
                 await loop.run_in_executor(
                     None,
                     lambda: self._client.table("smart_money_profiles").upsert(data).execute()
@@ -298,6 +305,14 @@ class DatabaseManager:
         if self._connected and self._client:
             try:
                 loop = asyncio.get_running_loop()
+                wallet_rows = [{"wallet_address": p.wallet_address} for p in profiles]
+                # Ensure parent rows exist in 'wallets' to satisfy foreign key constraint
+                await loop.run_in_executor(
+                    None,
+                    lambda: self._client.table("wallets")
+                        .upsert(wallet_rows, on_conflict="wallet_address")
+                        .execute()
+                )
                 await loop.run_in_executor(
                     None,
                     lambda: self._client.table("smart_money_profiles").upsert(rows).execute()

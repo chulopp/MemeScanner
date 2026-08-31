@@ -100,7 +100,7 @@ class DiscoveryConfig:
     runner_threshold_multiplier: float = 2.0   # ≥2x = runner
     dead_threshold_multiplier: float = 0.1     # ≤0.1x = dead
     runner_fdv_threshold_usd: float = 20_000   # ≥$20k MC on pump.fun (4x launch)
-    max_token_age_hours: float = 12.0          # Fresh active runners <= 12 hours old
+    max_token_age_hours: float = 168.0         # Active runners within the last 7 days (1 week)
     batch_size: int = 50
     batch_delay_seconds: float = 1.0
     wallet_history_tx_limit: int = 100
@@ -224,16 +224,17 @@ class RunnerCollector:
     ) -> list[RunnerToken]:
         """
         Fetch fresh runner tokens directly from pump.fun frontend API.
-        Only tokens created within config.max_token_age_hours (default 12h)
+        Only tokens created within config.max_token_age_hours (default 168h = 7 days)
         and with market cap >= $20k (≥4x from launch).
         """
         runners: list[RunnerToken] = []
         now_ms = time.time() * 1000
         max_age_ms = config.max_token_age_hours * 3600 * 1000
 
-        sort_modes = ["last_trade_timestamp", "market_cap"]
+        # Scan across all 3 primary sorting methods up to offset 1500 (30 pages per sort)
+        sort_modes = ["market_cap", "last_trade_timestamp", "created_timestamp"]
         for sort_mode in sort_modes:
-            for offset in range(0, 300, 50):
+            for offset in range(0, 1500, 50):
                 url = (
                     f"https://frontend-api-v3.pump.fun/coins"
                     f"?offset={offset}&limit=50&sort={sort_mode}&order=DESC&includeNsfw=true"
@@ -274,7 +275,7 @@ class RunnerCollector:
                             ))
                             seen_addresses.add(mint)
 
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(0.15)
                 except Exception as e:
                     logger.debug(f"Pump.fun fresh fetch error (sort={sort_mode}, offset={offset}): {e}")
                     break

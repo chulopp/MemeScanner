@@ -67,8 +67,8 @@ def parse_args() -> argparse.Namespace:
         help="Seconds after token launch considered 'early' (default: 600 = 10 min)"
     )
     parser.add_argument(
-        "--max-age-hours", type=float, default=48.0,
-        help="Maximum age of runner tokens in hours (default: 48.0 = only fresh tokens <=48h old)"
+        "--max-age-hours", type=float, default=168.0,
+        help="Maximum age of runner tokens in hours (default: 168.0 = 7 days / 1 week)"
     )
     parser.add_argument(
         "--batch-size", type=int, default=50,

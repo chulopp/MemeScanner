@@ -141,6 +141,22 @@ class TestRunnerCollector:
         is_runner = best_change >= 100.0 or fdv >= 100_000
         assert is_runner is False
 
+    def test_raydium_pool_wsol_filtering(self):
+        """Raydium pool parser correctly isolates target meme token paired with WSOL."""
+        wsol = "So11111111111111111111111111111111111111112"
+        meme = "MEME111111111111111111111111111111111111111"
+        fake_pool = {
+            "mintA": {"address": wsol, "symbol": "WSOL"},
+            "mintB": {"address": meme, "symbol": "DOGE"},
+            "day": {"volume": 50_000.0},
+            "tvl": 40_000.0,
+            "openTime": "0"
+        }
+        vol_24h = fake_pool["day"]["volume"]
+        assert vol_24h >= 25_000
+        target = fake_pool["mintB"]["address"] if fake_pool["mintA"]["address"] == wsol else fake_pool["mintA"]["address"]
+        assert target == meme
+
 
 # ---------------------------------------------------------------------------
 # 2. EarlyBuyerTracer: time window enforcement

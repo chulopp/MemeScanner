@@ -21,6 +21,12 @@ class RawTokenEvent(BaseModel):
     pool_address: Optional[str] = None
     raw_payload: dict[str, Any] = Field(default_factory=dict)
 
+    # Pintu B attribution — populated by WalletTrackerListener
+    source: str = "NEW_PAIR"  # 'NEW_PAIR' | 'WALLET_TRACKER'
+    triggered_by_wallet: Optional[str] = None  # Smart Money wallet address that triggered this signal
+    triggered_by_wallet_sol_spent: float = 0.0  # SOL the Smart Money wallet spent on this buy
+    triggered_by_tx_signature: Optional[str] = None  # Transaction signature for audit trail
+
     @field_validator("token_address")
     @classmethod
     def validate_token_address(cls, v: str) -> str:

@@ -42,12 +42,14 @@ from src.discovery.smart_money_discovery import (
 DEFAULT_CONFIG = DiscoveryConfig(
     max_runners=10,
     min_runner_hits=3,
-    min_hit_ratio=0.15,
-    min_sol_balance=50.0,
-    min_classifiable_buys=10,
     early_window_seconds=600,
     batch_size=5,
     dexscreener_batch_size=30,
+    min_entry_sol=1.0,
+    min_trades_90d=20,
+    lineage_min_trades_90d=5,
+    min_pnl_90d_sol=0.0,
+    min_pnl_30d_sol=0.0,
 )
 
 NOW = datetime.now(tz=timezone.utc)
@@ -199,23 +201,15 @@ class TestEarlyBuyerTracer:
 
 class TestWalletQualifierBalance:
 
-    @pytest.mark.asyncio
-    async def test_rejects_wallet_below_min_sol(self):
-        """Wallet with 30 SOL (< 50 SOL min) should be rejected."""
-        qualifier = WalletQualifier()
-        with patch.object(qualifier, "_check_sol_balance", new_callable=AsyncMock) as mock_bal:
-            mock_bal.return_value = 30.0  # Below min
-            balance = await qualifier._check_sol_balance("WALLET_POOR")
-            assert balance < DEFAULT_CONFIG.min_sol_balance
+    def test_rejects_buy_below_min_sol(self):
+        """Entry with 0.5 SOL (< 1 SOL min) should be filtered out by size gate."""
+        buy_sol = 0.5
+        assert buy_sol < DEFAULT_CONFIG.min_entry_sol
 
-    @pytest.mark.asyncio
-    async def test_passes_wallet_above_min_sol(self):
-        """Wallet with 75 SOL (≥ 50 SOL min) should pass balance check."""
-        qualifier = WalletQualifier()
-        with patch.object(qualifier, "_check_sol_balance", new_callable=AsyncMock) as mock_bal:
-            mock_bal.return_value = 75.0
-            balance = await qualifier._check_sol_balance("WALLET_RICH")
-            assert balance >= DEFAULT_CONFIG.min_sol_balance
+    def test_passes_buy_above_min_sol(self):
+        """Entry with 1.5 SOL (>= 1 SOL min) should pass size gate."""
+        buy_sol = 1.5
+        assert buy_sol >= DEFAULT_CONFIG.min_entry_sol
 
 
 # ---------------------------------------------------------------------------
@@ -351,80 +345,79 @@ class TestTokenClassification:
 
 
 # ---------------------------------------------------------------------------
-# 6. Negative Control: Auto-reject for low sample
+# 6. Phase 3b: Trade Count Gate
 # ---------------------------------------------------------------------------
 
-class TestNegativeControlSampleSize:
+class TestTradeCountGate:
 
-    def test_rejects_wallet_with_low_sample_size(self):
-        """Wallet with only 5 classifiable buys (< 10 min) should be rejected."""
-        total_runner = 3
-        total_dead = 2
-        total_classifiable = total_runner + total_dead   # = 5
-        min_sample = DEFAULT_CONFIG.min_classifiable_buys  # = 10
-
-        if total_classifiable < min_sample:
-            rejection_reason = "low_sample"
-            status = "REJECTED"
-        else:
-            rejection_reason = ""
-            status = "PENDING"
-
+    def test_rejects_wallet_with_insufficient_trades(self):
+        """Wallet with 5 trades (< 20 min) should be rejected."""
+        total_trades = 5
+        funded_by_sm = False
+        effective_min = DEFAULT_CONFIG.lineage_min_trades_90d if funded_by_sm else DEFAULT_CONFIG.min_trades_90d
+        status = "REJECTED" if total_trades < effective_min else "PENDING"
         assert status == "REJECTED"
-        assert rejection_reason == "low_sample"
 
-    def test_passes_wallet_with_sufficient_sample_size(self):
-        """Wallet with 15 classifiable buys (≥ 10 min) should pass sample check."""
-        total_runner = 10
-        total_dead = 5
-        total_classifiable = total_runner + total_dead  # = 15
-        min_sample = DEFAULT_CONFIG.min_classifiable_buys  # = 10
-
-        if total_classifiable < min_sample:
-            status = "REJECTED"
-        else:
-            status = "PENDING"
-
+    def test_passes_wallet_with_sufficient_trades(self):
+        """Wallet with 25 trades (>= 20 min) should pass."""
+        total_trades = 25
+        funded_by_sm = False
+        effective_min = DEFAULT_CONFIG.lineage_min_trades_90d if funded_by_sm else DEFAULT_CONFIG.min_trades_90d
+        status = "REJECTED" if total_trades < effective_min else "PENDING"
         assert status == "PENDING"
 
+    def test_lineage_wallet_relaxed_threshold(self):
+        """Wallet with SM lineage and 8 trades (>= 5 relaxed min) should pass."""
+        total_trades = 8
+        funded_by_sm = True
+        effective_min = DEFAULT_CONFIG.lineage_min_trades_90d if funded_by_sm else DEFAULT_CONFIG.min_trades_90d
+        assert effective_min == 5  # lineage_min_trades_90d
+        status = "REJECTED" if total_trades < effective_min else "PENDING"
+        assert status == "PENDING"
 
-# ---------------------------------------------------------------------------
-# 7. Negative Control: Sniper bot rejection vs smart money qualification
-# ---------------------------------------------------------------------------
-
-class TestNegativeControlRatio:
-
-    def test_sniper_bot_rejected(self):
-        """Wallet buying 95% dead tokens should be rejected (ratio = 5%)."""
-        runner_count = 1
-        dead_count = 19
-        classifiable = runner_count + dead_count  # 20
-        ratio = runner_count / classifiable  # 0.05
-
-        status = "QUALIFIED" if ratio >= DEFAULT_CONFIG.min_hit_ratio else "REJECTED"
+    def test_lineage_wallet_still_rejected_below_relaxed_threshold(self):
+        """Wallet with SM lineage and 2 trades (< 5 relaxed min) should still be rejected."""
+        total_trades = 2
+        funded_by_sm = True
+        effective_min = DEFAULT_CONFIG.lineage_min_trades_90d if funded_by_sm else DEFAULT_CONFIG.min_trades_90d
+        status = "REJECTED" if total_trades < effective_min else "PENDING"
         assert status == "REJECTED"
-        assert ratio == pytest.approx(0.05)
 
-    def test_selective_smart_money_qualified(self):
-        """Wallet with 25% runner ratio (≥ 15% min) should be QUALIFIED."""
-        runner_count = 5
-        dead_count = 15
-        classifiable = runner_count + dead_count  # 20
-        ratio = runner_count / classifiable  # 0.25
 
-        status = "QUALIFIED" if ratio >= DEFAULT_CONFIG.min_hit_ratio else "REJECTED"
-        assert status == "QUALIFIED"
-        assert ratio == pytest.approx(0.25)
+# ---------------------------------------------------------------------------
+# 7. Phase 3c: P&L Gate
+# ---------------------------------------------------------------------------
 
-    def test_exact_boundary_ratio_passes(self):
-        """Wallet at exactly 15% ratio should pass (inclusive boundary)."""
-        runner_count = 3
-        dead_count = 17
-        classifiable = runner_count + dead_count  # 20
-        ratio = runner_count / classifiable  # 0.15
+class TestPnLGate:
 
-        status = "QUALIFIED" if ratio >= DEFAULT_CONFIG.min_hit_ratio else "REJECTED"
-        assert status == "QUALIFIED"
+    def test_rejects_wallet_with_negative_pnl_90d(self):
+        """Wallet with negative 90d PnL should be rejected."""
+        pnl_90d = -5.0
+        pnl_30d = 2.0
+        status = "REJECTED" if pnl_90d <= 0 or pnl_30d <= 0 else "PENDING"
+        assert status == "REJECTED"
+
+    def test_rejects_wallet_with_negative_pnl_30d(self):
+        """Wallet with positive 90d but negative 30d PnL should be rejected (recent declining)."""
+        pnl_90d = 10.0
+        pnl_30d = -1.0
+        status = "REJECTED" if pnl_90d <= 0 or pnl_30d <= 0 else "PENDING"
+        assert status == "REJECTED"
+
+    def test_passes_wallet_with_both_positive_pnl(self):
+        """Wallet with positive PnL in both 90d and 30d should pass."""
+        pnl_90d = 15.0
+        pnl_30d = 3.5
+        status = "REJECTED" if pnl_90d <= 0 or pnl_30d <= 0 else "PENDING"
+        assert status == "PENDING"
+
+    def test_exact_zero_pnl_is_rejected(self):
+        """Wallet with exactly 0 PnL should be rejected (> 0 required)."""
+        pnl_90d = 0.0
+        pnl_30d = 5.0
+        # min_pnl_90d_sol = 0.0 means must be STRICTLY > 0
+        status = "REJECTED" if pnl_90d <= DEFAULT_CONFIG.min_pnl_90d_sol else "PENDING"
+        assert status == "REJECTED"
 
 
 # ---------------------------------------------------------------------------
@@ -472,12 +465,12 @@ class TestSyncToSmartMoneyProfiles:
         qualified = [
             WalletEvaluation(
                 wallet_address="WALLET_QUALIFIED_001",
-                sol_balance=75.0,
                 runner_hit_count=5,
-                dead_hit_count=10,
-                total_early_buys=15,
-                hit_ratio=0.333,
                 status="QUALIFIED",
+                realized_pnl_90d_sol=12.5,
+                realized_pnl_30d_sol=3.0,
+                total_trades_90d=25,
+                pnl_provider="vybe",
             )
         ]
 
@@ -548,16 +541,14 @@ class TestEndToEndPipeline:
             mock_qualify.return_value = [
                 WalletEvaluation(
                     wallet_address="WALLET_SMART_001",
-                    sol_balance=100.0,
                     runner_hit_count=3,
-                    dead_hit_count=5,
-                    total_early_buys=8,
-                    hit_ratio=0.375,
                     status="QUALIFIED",
                 )
             ]
             mock_sync.return_value = 1
             mock_db.connect = MagicMock()
+            mock_db.get_traced_token_addresses = AsyncMock(return_value=set())
+            mock_db.get_evaluated_wallet_addresses = AsyncMock(return_value=set())
 
             evaluations = await orchestrator.run(dry_run=True)
 

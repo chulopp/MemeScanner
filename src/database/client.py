@@ -560,6 +560,27 @@ class DatabaseManager:
             except Exception as e:
                 logger.debug(f"Supabase get_evaluated_wallet_addresses error: {e}")
         return set()
+    async def get_active_smart_money_addresses(self) -> set[str]:
+        """
+        Returns set of wallet_address from smart_money_profiles where is_active=True.
+        Used by Phase 2b (Lineage Check) to identify wallets already qualified as smart money.
+        Loaded ONCE per discovery run for deterministic pipeline behaviour.
+        """
+        if self._connected and self._client:
+            try:
+                loop = asyncio.get_running_loop()
+                resp = await loop.run_in_executor(
+                    None,
+                    lambda: self._client.table("smart_money_profiles")
+                        .select("wallet_address")
+                        .eq("is_active", True)
+                        .execute()
+                )
+                if resp.data:
+                    return {row["wallet_address"] for row in resp.data}
+            except Exception as e:
+                logger.debug(f"Supabase get_active_smart_money_addresses error: {e}")
+        return set()
 
 
 db_manager = DatabaseManager()

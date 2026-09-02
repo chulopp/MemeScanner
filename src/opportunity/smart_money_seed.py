@@ -15,73 +15,95 @@ from src.utils.logger import logger
 
 SOLANA_PUBKEY_REGEX = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
-# Curated Verified Smart Money Wallets from User Observation
+# Curated Verified Smart Money Wallets from User Observation (Real On-Chain Metrics)
 CURATED_SMART_MONEY_SEEDS: list[dict] = [
     {
         "wallet_address": "2fg5QD1eD7rzNNCsvnhmXFm5hqNgwTTG8p7kQ6f3rx6f",
-        "net_realized_profit_sol": 45.0,
-        "total_volume_sol": 210.0,
-        "total_trades_recorded": 28,
-        "win_rate_pct": 60.7,
-        "profit_factor": 2.15,
-        "tier": "ACTIVE",
+        "net_realized_profit_sol": 0.0,
+        "total_volume_sol": 0.0,
+        "total_trades_recorded": 15,
+        "win_rate_pct": 0.0,
+        "profit_factor": 0.0,
+        "tier": "SEED",
         "source": "USER_CURATED",
         "notes": "User-verified early memecoin accumulation wallet"
     },
     {
         "wallet_address": "2T5NgDDidkvhJQg8AHDi74uCFwgp25pYFMRZXBaCUNBH",
-        "net_realized_profit_sol": 62.5,
-        "total_volume_sol": 340.0,
-        "total_trades_recorded": 34,
-        "win_rate_pct": 64.7,
-        "profit_factor": 2.30,
+        "net_realized_profit_sol": 15.51,
+        "total_volume_sol": 69.60,
+        "total_trades_recorded": 171,
+        "win_rate_pct": 34.5,
+        "profit_factor": 2.0,
         "tier": "ACTIVE",
         "source": "USER_CURATED",
         "notes": "User-verified runner sniper"
     },
     {
         "wallet_address": "2X4H5Y9C4Fy6Pf3wpq8Q4gMvLcWvfrrwDv2bdR8AAwQv",
-        "net_realized_profit_sol": 38.2,
-        "total_volume_sol": 180.0,
-        "total_trades_recorded": 22,
-        "win_rate_pct": 59.1,
-        "profit_factor": 1.95,
-        "tier": "ACTIVE",
+        "net_realized_profit_sol": -150.13,
+        "total_volume_sol": 180.10,
+        "total_trades_recorded": 43,
+        "win_rate_pct": 16.3,
+        "profit_factor": 0.0,
+        "tier": "SEED",
         "source": "USER_CURATED",
-        "notes": "User-verified high conviction early buyer"
+        "notes": "User-verified early buyer"
     },
     {
         "wallet_address": "4BdKaxN8G6ka4GYtQQWk4G4dZRUTX2vQH9GcXdBREFUk",
-        "net_realized_profit_sol": 89.0,
-        "total_volume_sol": 450.0,
-        "total_trades_recorded": 41,
-        "win_rate_pct": 68.3,
-        "profit_factor": 2.50,
-        "tier": "ACTIVE",
+        "net_realized_profit_sol": 0.0,
+        "total_volume_sol": 0.0,
+        "total_trades_recorded": 34,
+        "win_rate_pct": 0.0,
+        "profit_factor": 0.0,
+        "tier": "SEED",
         "source": "USER_CURATED",
-        "notes": "User-verified pump.fun breakout trader"
+        "notes": "User-verified pump.fun trader"
     },
     {
         "wallet_address": "4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9",
-        "net_realized_profit_sol": 54.8,
-        "total_volume_sol": 290.0,
-        "total_trades_recorded": 31,
-        "win_rate_pct": 61.3,
-        "profit_factor": 2.10,
-        "tier": "ACTIVE",
+        "net_realized_profit_sol": -2.13,
+        "total_volume_sol": 9.97,
+        "total_trades_recorded": 27,
+        "win_rate_pct": 14.8,
+        "profit_factor": 0.0,
+        "tier": "SEED",
         "source": "USER_CURATED",
-        "notes": "User-verified fast swing trader"
+        "notes": "User-verified swing trader"
     },
     {
         "wallet_address": "87rRdssFiTJKY4MGARa4G5vQ31hmR7MxSmhzeaJ5AAxJ",
-        "net_realized_profit_sol": 71.4,
-        "total_volume_sol": 380.0,
-        "total_trades_recorded": 37,
-        "win_rate_pct": 64.9,
-        "profit_factor": 2.25,
+        "net_realized_profit_sol": -70.21,
+        "total_volume_sol": 143.29,
+        "total_trades_recorded": 58,
+        "win_rate_pct": 62.1,
+        "profit_factor": 0.0,
+        "tier": "SEED",
+        "source": "USER_CURATED",
+        "notes": "User-verified scalp trader"
+    },
+    {
+        "wallet_address": "BafcHutB6YAA29XJvwThwR6Nust813q2fKMikLMGr1PG",
+        "net_realized_profit_sol": 0.01,
+        "total_volume_sol": 0.42,
+        "total_trades_recorded": 88,
+        "win_rate_pct": 26.1,
+        "profit_factor": 2.0,
         "tier": "ACTIVE",
         "source": "USER_CURATED",
-        "notes": "User-verified high win rate scalp trader"
+        "notes": "User-verified smart money wallet"
+    },
+    {
+        "wallet_address": "2uBuixjqQgxjyywdP4MNKuSXUne7sisvTw6T1n9oKV71",
+        "net_realized_profit_sol": 12.66,
+        "total_volume_sol": 57.81,
+        "total_trades_recorded": 33,
+        "win_rate_pct": 57.6,
+        "profit_factor": 2.0,
+        "tier": "ACTIVE",
+        "source": "USER_CURATED",
+        "notes": "User-verified smart money wallet"
     }
 ]
 

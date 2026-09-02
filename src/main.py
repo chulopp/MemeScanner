@@ -31,6 +31,7 @@ from src.utils.solana_rpc import solana_rpc
 from src.paper_trading.outcome_worker import outcome_worker
 from src.paper_trading.delayed_evaluator import delayed_evaluator
 from src.paper_trading import price_fetcher as pt_price_fetcher
+from src.ingestion.wallet_tracker_ws import WalletTrackerListener
 
 
 class MemeScannerApp:
@@ -41,11 +42,13 @@ class MemeScannerApp:
         self.duration = duration
         self.processed_tokens: list[dict] = []
         self.ingestion_manager = IngestionManager(self._on_token_ingested)
+        self._wallet_tracker = WalletTrackerListener(self._on_token_ingested)
         self._shutdown_event = asyncio.Event()
         self._evaluator_task: Optional[asyncio.Task] = None
 
     async def _on_token_ingested(self, event: RawTokenEvent):
-        """Callback invoked whenever a new token is ingested."""
+        """Callback invoked whenever a new token is ingested (Pintu A or Pintu B)."""
+        source_tag = f"[{event.source}]"
         # Route to safety filter pipeline
         result: SafetyCheckResult = await filter_pipeline.process_token(event)
 
@@ -55,6 +58,8 @@ class MemeScannerApp:
             "name": event.name,
             "token_address": event.token_address,
             "launch_venue": event.launch_venue,
+            "source": event.source,
+            "triggered_by_wallet": event.triggered_by_wallet,
             "status": "PASSED_SAFETY" if result.filter_pass else "REJECTED",
             "opportunity_score": result.opportunity_score,
             "dev_holding_pct": result.dev_holding_pct,
@@ -121,8 +126,15 @@ class MemeScannerApp:
         except Exception as de_err:
             logger.warning(f"Delayed evaluator start skipped: {de_err}")
 
-        # Start ingestion listeners
+        # Start ingestion listeners (Pintu A: PumpPortal + Raydium)
         await self.ingestion_manager.start()
+
+        # Start Wallet Tracker (Pintu B: Smart Money Wallet Watcher)
+        try:
+            await self._wallet_tracker.start()
+            logger.info("[WalletTracker] Pintu B: Smart Money Wallet Tracker started.")
+        except Exception as wt_err:
+            logger.warning(f"Wallet tracker start skipped: {wt_err}")
 
         if self.smoke_test:
             logger.info(f"Running in SMOKE TEST mode for {self.duration} seconds...")
@@ -143,6 +155,7 @@ class MemeScannerApp:
         if self._evaluator_task and not self._evaluator_task.done():
             self._evaluator_task.cancel()
         await self.ingestion_manager.stop()
+        await self._wallet_tracker.stop()
         await funding_tracer.close()
         await solana_rpc.close()
         await price_feed.close()

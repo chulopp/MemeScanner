@@ -23,6 +23,7 @@ from src.ingestion.schemas import RawTokenEvent
 from src.opportunity.scorer import OpportunityScorer, OpportunityScoreResult
 from src.backtest.cost_model import CostModelConfig, compute_trade_cost, load_p80_priority_fee_from_supabase
 from src.backtest.metrics import BacktestSignal, BacktestMetrics, compute_metrics
+from src.exit.strategy import simulate_exit, DEFAULT_EXIT_CONFIG, ExitStrategyConfig
 from src.utils.logger import logger
 
 
@@ -88,7 +89,8 @@ def _build_raw_token_event(row: dict) -> Optional[RawTokenEvent]:
 async def run_replay_on_tokens(
     tokens: list[dict],
     opportunity_threshold: float = 60.0,  # HYPOTHESIS_INIT
-    weight_overrides: Optional[dict] = None
+    weight_overrides: Optional[dict] = None,
+    exit_config: Optional[ExitStrategyConfig] = None,
 ) -> BacktestMetrics:
     """
     Executes replay evaluation on a specific list of token dicts (used by Walk-Forward CV).
@@ -102,6 +104,7 @@ async def run_replay_on_tokens(
 
     scorer = OpportunityScorer()
     signals: list[BacktestSignal] = []
+    cfg_exit = exit_config or DEFAULT_EXIT_CONFIG
 
     # Build settings overrides for weight injection
     settings_patches: dict = {}
@@ -150,8 +153,41 @@ async def run_replay_on_tokens(
             except Exception as e:
                 logger.debug(f"Scorer error for {event.token_address[:8]}: {e}")
 
-        # --- Cost Model ---
+        # --- Cost Model (entry cost) ---
         trade_cost = compute_trade_cost(liquidity_usd, cost_config)
+
+        # --- Fase Exit: Simulate exit strategy ---
+        # Extract price changes from DexScreener priceChange field
+        raw = row.get("raw_dexscreener") or {}
+        price_change = raw.get("priceChange") or {}
+        price_changes: dict[str, float] = {}
+        for window in ("m5", "h1", "h6", "h24"):
+            val = price_change.get(window)
+            if val is not None:
+                try:
+                    price_changes[window] = float(val)
+                except (TypeError, ValueError):
+                    pass
+
+        # Determine entry price for exit simulation
+        exit_entry_price = None
+        if price_t2 and price_t2 > 0:
+            exit_entry_price = price_t2
+        elif row.get("launch_price_usd") and row.get("launch_price_usd") > 0:
+            exit_entry_price = row["launch_price_usd"]
+
+        exit_result = None
+        if exit_entry_price and price_changes:
+            try:
+                exit_result = simulate_exit(
+                    entry_price=exit_entry_price,
+                    price_changes=price_changes,
+                    entry_liquidity_usd=liquidity_usd,
+                    config=cfg_exit,
+                    entry_cost_pct=trade_cost.total_cost_pct,
+                )
+            except Exception as e:
+                logger.debug(f"Exit simulation error for {event.token_address[:8]}: {e}")
 
         signals.append(BacktestSignal(
             token_address=event.token_address,
@@ -165,6 +201,10 @@ async def run_replay_on_tokens(
             rejection_reason=rejection_reason,
             label_return_pct_t2=label_return_pct_t2,
             t0_fallback=t0_fallback,
+            realized_return_pct=exit_result.realized_return_pct if exit_result else None,
+            tp_tiers_hit=exit_result.tp_tiers_hit if exit_result else 0,
+            moonbag_return_pct=exit_result.moonbag_return_pct if exit_result else None,
+            moonbag_exit_reason=exit_result.moonbag_exit_reason if exit_result else "N/A",
         ))
 
     return compute_metrics(signals, opportunity_threshold)
@@ -173,6 +213,7 @@ async def run_replay_on_tokens(
 async def run_replay(
     opportunity_threshold: float = 60.0,  # HYPOTHESIS_INIT
     weight_overrides: Optional[dict] = None,
+    exit_config: Optional[ExitStrategyConfig] = None,
     limit: int = 500
 ) -> BacktestMetrics:
     """
@@ -195,13 +236,15 @@ async def run_replay(
     metrics = await run_replay_on_tokens(
         tokens=rows,
         opportunity_threshold=opportunity_threshold,
-        weight_overrides=weight_overrides
+        weight_overrides=weight_overrides,
+        exit_config=exit_config,
     )
 
     logger.info(
         f"📊 Results: Filter Precision={metrics.filter_precision:.1%} | "
         f"Opp Recall={metrics.opportunity_recall:.1%} | "
         f"EV/Trade={metrics.ev_per_trade:+.2f}% | "
+        f"EV/Trade(exit)={metrics.ev_per_trade_with_exit:+.2f}% | "
         f"EV Positive: {'✅' if metrics.ev_positive else '❌'}"
     )
 

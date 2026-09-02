@@ -6,6 +6,8 @@ Usage:
   python -m src.backtest run          [--threshold F] [--limit N]
   python -m src.backtest optimize     [--iterations N] [--folds K]
   python -m src.backtest report       [--output PATH]
+  python -m src.backtest backfill-t2  [--limit N]         # slow GeckoTerminal OHLCV (exact T+2)
+  python -m src.backtest backfill-t2-fast [--limit N]     # fast m5 approximation (seconds, no API)
 """
 
 import argparse
@@ -72,6 +74,34 @@ async def _cmd_optimize(iterations: int, folds: int, limit: int) -> None:
     print(f"  OOS EV Positive:                 {'✅ YA' if result.get('is_ev_positive_oos') else '❌ TIDAK'}")
 
 
+async def _cmd_backfill_t2(limit: int) -> None:
+    from src.backtest.data_collector import backfill_t2_prices
+    await db_manager.initialize()
+    stats = await backfill_t2_prices(limit=limit)
+    print(f"\n⚡ T+2 Price Backfill Summary (GeckoTerminal OHLCV):")
+    print(f"  Total Checked: {stats['total_checked']}")
+    print(f"  Updated:       {stats['updated']}")
+    print(f"  Failed:        {stats['failed']}")
+
+
+async def _cmd_backfill_t2_fast(limit: int, batch_size: int) -> None:
+    from src.backtest.data_collector import backfill_t2_prices_from_m5
+    await db_manager.initialize()
+    stats = await backfill_t2_prices_from_m5(limit=limit, batch_size=batch_size)
+    print(f"\n⚡ T+2 Fast Backfill Summary (launch_price_usd proxy — zero API calls):")
+    print(f"  Total Checked:     {stats['total_checked']}")
+    print(f"  Updated:           {stats['updated']}")
+    print(f"  Skipped (no price):{stats['skipped_no_price']}")
+    print(f"  Skipped (invalid): {stats['skipped_invalid']}")
+    coverage = (
+        round(stats['updated'] / stats['total_checked'] * 100, 1)
+        if stats['total_checked'] > 0 else 0.0
+    )
+    print(f"  Coverage:          {coverage}%")
+    print(f"\n  NOTE: price_usd_at_t2 is set to launch_price_usd (T=0 proxy, t0_fallback=True).")
+    print(f"  Tokens without launch_price_usd remain NULL.")
+
+
 async def _cmd_report(output: str) -> None:
     from src.backtest.reporter import generate_report
     await db_manager.initialize()
@@ -93,6 +123,21 @@ def main() -> None:
     p_collect = subparsers.add_parser("collect-live", aliases=["collect"], help="Stream live token births from WebSocket at T=0")
     p_collect.add_argument("--target", type=int, default=200, help="Target token count (default: 200)")
     p_collect.add_argument("--duration", type=int, default=None, help="Max duration in seconds")
+
+    # backfill-t2 (GeckoTerminal OHLCV — slow, exact)
+    p_backfill = subparsers.add_parser(
+        "backfill-t2", aliases=["backfill"],
+        help="Backfill T+2 prices via GeckoTerminal 1-min OHLCV (slow, exact — ~4h for 10k tokens)"
+    )
+    p_backfill.add_argument("--limit", type=int, default=10000, help="Max tokens to backfill (default: 10000)")
+
+    # backfill-t2-fast (DexScreener m5 approximation — zero API calls, seconds)
+    p_backfill_fast = subparsers.add_parser(
+        "backfill-t2-fast",
+        help="Backfill T+2 prices from stored m5 priceChange (fast, no API calls, completes in <1 min)"
+    )
+    p_backfill_fast.add_argument("--limit", type=int, default=10000, help="Max tokens to backfill (default: 10000)")
+    p_backfill_fast.add_argument("--batch-size", type=int, default=100, help="DB write batch size (default: 100)")
 
     # resolve / label
     p_resolve = subparsers.add_parser("resolve", aliases=["label"], help="Resolve 24h outcomes for mature tokens")
@@ -118,6 +163,10 @@ def main() -> None:
 
     if args.command in ["collect-live", "collect"]:
         asyncio.run(_cmd_collect_live(args.target, args.duration))
+    elif args.command in ["backfill-t2", "backfill"]:
+        asyncio.run(_cmd_backfill_t2(args.limit))
+    elif args.command == "backfill-t2-fast":
+        asyncio.run(_cmd_backfill_t2_fast(args.limit, args.batch_size))
     elif args.command in ["resolve", "label"]:
         asyncio.run(_cmd_resolve(args.limit, args.force))
     elif args.command == "run":
@@ -130,3 +179,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

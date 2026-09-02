@@ -18,6 +18,7 @@ from typing import Optional, Any
 from src.database.client import db_manager
 from src.backtest.cross_validation import split_time_series_folds, evaluate_walk_forward_cv, WalkForwardCVResult
 from src.backtest.replay_engine import run_replay_on_tokens
+from src.exit.strategy import ExitStrategyConfig, TpTier, TrailingTier
 from src.utils.logger import logger
 
 try:
@@ -34,12 +35,21 @@ def _get_search_space():
     if not SKOPT_AVAILABLE or Real is None:
         return []
     return [
+        # Scoring weights — HYPOTHESIS_INIT
         Real(0.20, 0.45, name="weight_vol_velocity"),   # Base: 0.35
         Real(0.15, 0.40, name="weight_smart_money"),     # Base: 0.30
         Real(0.05, 0.25, name="weight_global_fee"),      # Base: 0.15
         Real(0.05, 0.20, name="weight_holder_curve"),    # Base: 0.10
         Real(0.05, 0.20, name="weight_social_meta"),     # Base: 0.10
         Real(25.0, 70.0, name="opportunity_threshold"),  # Base: 60.0
+        # Exit strategy parameters — HYPOTHESIS_INIT
+        Real(-65.0, -30.0, name="exit_sl_pct"),                  # Base: -50.0
+        Real(50.0, 200.0, name="exit_tp1_pct"),                  # Base: 100.0 (2x)
+        Real(200.0, 500.0, name="exit_tp2_pct"),                 # Base: 300.0 (4x)
+        Real(400.0, 1000.0, name="exit_tp3_pct"),                # Base: 500.0 (6x)
+        Real(25.0, 55.0, name="exit_trailing_tier1_pct"),        # Base: 40.0 (trail at <2x ATH)
+        Real(35.0, 65.0, name="exit_trailing_tier2_pct"),        # Base: 50.0 (trail at 2-5x ATH)
+        Real(45.0, 75.0, name="exit_trailing_tier3_pct"),        # Base: 60.0 (trail at >10x ATH)
     ]
 
 
@@ -92,7 +102,9 @@ async def run_bayesian_optimization(
         def objective_fn(params):
             nonlocal eval_count, best_params, best_train_objective
 
-            w_vol, w_sm, w_fee, w_holder, w_social, threshold = params
+            w_vol, w_sm, w_fee, w_holder, w_social, threshold, \
+                exit_sl, exit_tp1, exit_tp2, exit_tp3, \
+                exit_trail1, exit_trail2, exit_trail3 = params
             eval_count += 1
 
             w_dict = {
@@ -103,14 +115,40 @@ async def run_bayesian_optimization(
                 "social_meta": w_social
             }
 
+            exit_cfg = ExitStrategyConfig(
+                sl_pct=exit_sl,
+                tp_tiers=[
+                    TpTier(sell_fraction=0.30, target_return_pct=exit_tp1),
+                    TpTier(sell_fraction=0.30, target_return_pct=exit_tp2),
+                    TpTier(sell_fraction=0.20, target_return_pct=exit_tp3),
+                ],
+                trailing_tiers=[
+                    TrailingTier(multiplier_threshold=10.0, trail_pct_from_ath=exit_trail3),
+                    TrailingTier(multiplier_threshold=5.0,  trail_pct_from_ath=exit_trail2),
+                    TrailingTier(multiplier_threshold=2.0,  trail_pct_from_ath=exit_trail1),
+                ],
+            )
+
             # Safely evaluate coroutine from thread on the main event loop
             future = asyncio.run_coroutine_threadsafe(
-                run_replay_on_tokens(primary_train_set, opportunity_threshold=threshold, weight_overrides=w_dict),
+                run_replay_on_tokens(
+                    primary_train_set,
+                    opportunity_threshold=threshold,
+                    weight_overrides=w_dict,
+                    exit_config=exit_cfg,
+                ),
                 loop
             )
             train_metrics = future.result()
 
-            obj = train_metrics.ev_per_trade + 0.5 * (train_metrics.filter_precision * 100.0)
+            # Objective: weighted combination of EV-with-exit (60%), EV-raw (20%), precision (20%)
+            # Prioritize exit-aware EV as primary gate metric
+            ev_exit = train_metrics.ev_per_trade_with_exit if train_metrics.exit_coverage_pct > 0.1 else train_metrics.ev_per_trade
+            obj = (
+                0.60 * ev_exit
+                + 0.20 * train_metrics.ev_per_trade
+                + 0.20 * (train_metrics.filter_precision * 100.0)
+            )
 
             if obj > best_train_objective:
                 best_train_objective = obj
@@ -120,11 +158,19 @@ async def run_bayesian_optimization(
                     "weight_global_fee": round(w_fee, 4),
                     "weight_holder_curve": round(w_holder, 4),
                     "weight_social_meta": round(w_social, 4),
-                    "opportunity_threshold": round(threshold, 2)
+                    "opportunity_threshold": round(threshold, 2),
+                    "exit_sl_pct": round(exit_sl, 2),
+                    "exit_tp1_pct": round(exit_tp1, 2),
+                    "exit_tp2_pct": round(exit_tp2, 2),
+                    "exit_tp3_pct": round(exit_tp3, 2),
+                    "exit_trailing_tier1_pct": round(exit_trail1, 2),
+                    "exit_trailing_tier2_pct": round(exit_trail2, 2),
+                    "exit_trailing_tier3_pct": round(exit_trail3, 2),
                 }
                 logger.info(
-                    f"✨ [Eval {eval_count}/{n_calls}] New Best Train EV: {train_metrics.ev_per_trade:+.2f}% | "
-                    f"Precision: {train_metrics.filter_precision:.1%} | Params: {best_params}"
+                    f"\u2728 [Eval {eval_count}/{n_calls}] New Best EV(exit)={ev_exit:+.2f}% | "
+                    f"EV(raw)={train_metrics.ev_per_trade:+.2f}% | "
+                    f"Precision: {train_metrics.filter_precision:.1%}"
                 )
 
             return -obj

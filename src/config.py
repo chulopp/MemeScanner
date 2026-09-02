@@ -86,6 +86,14 @@ class Settings(BaseSettings):
         validation_alias="ENABLE_WASH_TRADE_PENALTY"
     )
 
+    # --- Vybe Network API (Smart Money P&L provider) ---
+    vybe_api_key: str = Field(default="", validation_alias="VYBE_API_KEY")
+    vybe_base_url: str = Field(
+        default="https://api.vybenetwork.com",
+        validation_alias="VYBE_BASE_URL"
+    )
+
+
 
 settings = Settings()
 

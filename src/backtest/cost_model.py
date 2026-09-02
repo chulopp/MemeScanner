@@ -85,6 +85,58 @@ def compute_trade_cost(
     )
 
 
+def compute_exit_cost(
+    entry_liquidity_usd: float,
+    exit_return_pct: float,
+    config: Optional[CostModelConfig] = None,
+) -> TradeCost:
+    """
+    Compute slippage + priority fee for a single partial exit.
+
+    Liquidity at exit is estimated using sqrt-scaling of price multiple,
+    since AMM pool TVL tends to grow as price rises (LP rebalancing).
+    This is a conservative estimate — HYPOTHESIS_INIT.
+
+    Args:
+        entry_liquidity_usd: Pool liquidity at listing time (USD)
+        exit_return_pct    : Return at exit vs entry price (pct, e.g. 100.0 = 2x)
+        config             : Cost model config (uses defaults if None)
+
+    Returns:
+        TradeCost for this single exit event
+    """
+    cfg = config or CostModelConfig()
+
+    # Estimate pool liquidity at exit time
+    if exit_return_pct <= 0:
+        # On the way down, pool is typically thinner
+        liquidity_at_exit = entry_liquidity_usd * 0.5
+    else:
+        price_multiple = 1.0 + (exit_return_pct / 100.0)
+        liq_multiple = max(1.0, price_multiple ** 0.5)  # HYPOTHESIS_INIT: sqrt scaling
+        liquidity_at_exit = entry_liquidity_usd * liq_multiple
+
+    # Graduated slippage on exit liquidity
+    if liquidity_at_exit < LIQUIDITY_MICRO_THRESHOLD:
+        slippage = SLIPPAGE_MICRO
+    elif liquidity_at_exit < LIQUIDITY_SMALL_THRESHOLD:
+        slippage = SLIPPAGE_SMALL
+    else:
+        slippage = SLIPPAGE_MEDIUM
+
+    priority_fee_usd = cfg.priority_fee_sol * cfg.sol_price_usd
+    priority_fee_pct = (priority_fee_usd / cfg.trade_size_usd) * 100.0
+
+    # One-sided cost (exit only)
+    total_cost_pct = slippage + priority_fee_pct
+
+    return TradeCost(
+        slippage_pct=slippage,
+        priority_fee_usd=priority_fee_usd,
+        total_cost_pct=round(total_cost_pct, 4),
+    )
+
+
 async def load_p80_priority_fee_from_supabase() -> float:
     """
     Load P80 priority fee from actual Supabase metric_snapshots data.

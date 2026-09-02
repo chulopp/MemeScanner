@@ -2,17 +2,22 @@
 Smart Money Wallet Discovery Engine
 ====================================
 Discovers "Smart Money" wallets on Solana by:
-  Phase 1 — Collect runner tokens from DexScreener (≥2x return)
-  Phase 2 — Trace early buyers (≤10 min after launch) via Helius
-  Phase 3 — Qualify candidates:
-             3a. SOL balance ≥ 50
-             3b. Runner hit count ≥ 3 (across different tokens)
-             3c. Negative control: pull wallet's full buy history,
-                 classify each early-bought token as RUNNER/DEAD/NEUTRAL,
-                 require ≥10 classifiable buys and runner ratio ≥15%
-  Phase 4 — Sync QUALIFIED wallets → smart_money_profiles (SEED tier)
+  Phase 1  — Collect runner tokens from DexScreener (≥2x return)
+  Phase 2  — Trace early buyers (≤10 min after launch) via Helius
+               SIZE GATE: skip entries with buy_sol < min_entry_sol (1 SOL)
+  Phase 2b — Funding Lineage Check: check if wallet was funded (1-2 hops)
+               by a wallet already in smart_money_profiles
+  Phase 3a — Runner hit count ≥ min_runner_hits (3)
+  Phase 3b — Vybe trade count gate: ≥ min_trades_90d (20) for new wallets;
+               lineage wallets get relaxed threshold (lineage_min_trades_90d = 5)
+  Phase 3c — Vybe P&L gate: realized_pnl_90d > 0 AND realized_pnl_30d > 0
+               (Helius manual reconstruction as fallback)
+  Phase 4  — Sync QUALIFIED wallets → smart_money_profiles (SEED tier)
+               Fields populated: net_realized_profit_sol, total_volume_sol,
+               win_rate_pct, lineage_parent_wallet
 
-All decisions confirmed via grill session 2026-08-31.
+Redesigned 2026-09-01 — fixes Bug #3, removes flawed negative control,
+replaces SOL balance check with Vybe P&L and trade count.
 """
 
 from __future__ import annotations
@@ -36,6 +41,8 @@ from rich.table import Table
 from src.config import settings
 from src.database.client import db_manager
 from src.database.models import SmartMoneyProfileModel
+from src.discovery.pnl_provider import pnl_provider, PnLResult
+from src.discovery.lineage_checker import lineage_checker, LineageCheckResult
 from src.utils.logger import logger
 
 console = Console()
@@ -78,33 +85,49 @@ class TokenClassification:
 @dataclass
 class WalletEvaluation:
     wallet_address: str
-    sol_balance: float
-    runner_hit_count: int        # from Phase 2 (runner tokens)
-    dead_hit_count: int = 0      # from Phase 3 (wallet history)
+    sol_balance: float = 0.0
+    runner_hit_count: int = 0         # Phase 2: runner token hits
+    dead_hit_count: int = 0
     neutral_hit_count: int = 0
-    total_early_buys: int = 0    # runner + dead (classifiable only)
+    total_early_buys: int = 0
     hit_ratio: float = 0.0
-    status: str = "PENDING"      # 'QUALIFIED' | 'REJECTED'
+    status: str = "PENDING"           # 'QUALIFIED' | 'REJECTED'
     rejection_reason: str = ""
     history_hits: list[EarlyBuyRecord] = field(default_factory=list)
+    # P&L fields (Phase 3b/3c — from Vybe or Helius manual)
+    realized_pnl_90d_sol: float = 0.0
+    realized_pnl_30d_sol: float = 0.0
+    total_volume_sol: float = 0.0
+    total_trades_90d: int = 0
+    win_rate_pct: float = 0.0
+    pnl_provider: str = "unknown"
+    # Lineage fields (Phase 2b)
+    funded_by_known_smart_money: bool = False
+    lineage_parent_wallet: Optional[str] = None
+    lineage_hop_distance: int = 0     # 0 = none, 1 = direct, 2 = grandparent
 
 
 @dataclass
 class DiscoveryConfig:
     max_runners: int = 5000
     min_runner_hits: int = 3
-    min_hit_ratio: float = 0.15
-    min_sol_balance: float = 50.0
-    min_classifiable_buys: int = 10
-    early_window_seconds: int = 600    # 10 minutes
-    runner_threshold_multiplier: float = 2.0   # ≥2x = runner
-    dead_threshold_multiplier: float = 0.1     # ≤0.1x = dead
-    runner_fdv_threshold_usd: float = 20_000   # ≥$20k MC on pump.fun (4x launch)
-    max_token_age_hours: float = 168.0         # Active runners within the last 7 days (1 week)
+    early_window_seconds: int = 600       # 10 minutes
+    runner_threshold_multiplier: float = 2.0
+    dead_threshold_multiplier: float = 0.1
+    runner_fdv_threshold_usd: float = 20_000
+    max_token_age_hours: float = 168.0    # 7 days
     batch_size: int = 50
     batch_delay_seconds: float = 1.0
     wallet_history_tx_limit: int = 100
-    dexscreener_batch_size: int = 30           # max addresses per DexScreener call
+    dexscreener_batch_size: int = 30
+    # Phase 2 size gate (Bug #3 fix)
+    min_entry_sol: float = 1.0            # minimum SOL per buy to count as conviction entry
+    # Phase 3b: Vybe trade count gate
+    min_trades_90d: int = 20              # min trades in 90d for new wallets
+    lineage_min_trades_90d: int = 5       # relaxed threshold for SM-lineage wallets
+    # Phase 3c: Vybe P&L gate
+    min_pnl_90d_sol: float = 0.0          # realized PnL 90d must be > this
+    min_pnl_30d_sol: float = 0.0          # realized PnL 30d must be > this
 
 
 
@@ -608,13 +631,17 @@ class EarlyBuyerTracer:
                 if not fee_payer:
                     continue
 
+                # FIX Bug #3: sum all native SOL transfers FROM fee_payer in this tx
+                # (tokenAmount × 0.0 was incorrect — always produced 0)
                 buy_sol = 0.0
                 native_transfers = tx.get("nativeTransfers") or []
-                for transfer in native_transfers:
-                    if (transfer.get("toUserAccount") == token.token_address
-                            or transfer.get("fromUserAccount") == fee_payer):
-                        amount_lamports = transfer.get("amount", 0)
-                        buy_sol = max(buy_sol, amount_lamports / 1e9)
+                for nt in native_transfers:
+                    if nt.get("fromUserAccount") == fee_payer:
+                        buy_sol += nt.get("amount", 0) / 1e9
+
+                # Phase 2 SIZE GATE: skip low-conviction entries (< 1 SOL)
+                if buy_sol < config.min_entry_sol:
+                    continue
 
                 early_buyers.append(EarlyBuyRecord(
                     wallet_address=fee_payer,
@@ -920,10 +947,48 @@ class WalletQualifier:
         progress: Progress,
     ) -> list[WalletEvaluation]:
         """
-        Run the full 3-step qualification funnel.
-        Returns list of all WalletEvaluation (both QUALIFIED and REJECTED).
+        Run the redesigned 4-phase qualification funnel:
+          Phase 2b — Funding lineage check (reuses FundingGraphTracer)
+          Phase 3a — Runner hit count ≥ min_runner_hits
+          Phase 3b — Vybe trade count gate (lineage-aware threshold)
+          Phase 3c — Vybe P&L gate (90d AND 30d must be > 0)
+        Returns list of all WalletEvaluation (QUALIFIED and REJECTED).
         """
-        # ---- Step 3a: Runner hit count filter ----
+        all_candidates = [
+            addr for addr, hits in wallet_hits.items()
+            if addr not in already_evaluated
+        ]
+
+        # ---- Phase 2b: Funding Lineage Check ----
+        console.print(f"\n  [bold]Phase 2b:[/bold] Funding lineage check ({len(all_candidates):,} candidates)...")
+        task_lin = progress.add_task(
+            "[cyan]  Phase 2b: Checking funding lineage...",
+            total=len(all_candidates),
+        )
+        # Load known smart money wallets ONCE (deterministic — new qualifiers in THIS run
+        # do not appear here; they become eligible parents in the NEXT run)
+        known_sm_wallets = await db_manager.get_active_smart_money_addresses()
+        lineage_map: dict[str, LineageCheckResult] = {}
+        lineage_found = 0
+
+        for addr in all_candidates:
+            lin = await lineage_checker.check(addr, known_sm_wallets)
+            lineage_map[addr] = lin
+            if lin.funded_by_known_smart_money:
+                lineage_found += 1
+                logger.info(
+                    f"🔗 [Lineage] {addr[:8]} ← {lin.lineage_parent_wallet[:8]} "
+                    f"(hop={lin.lineage_hop_distance})"
+                )
+            progress.advance(task_lin)
+            await asyncio.sleep(0.05)
+
+        console.print(
+            f"    ↳ [cyan]{lineage_found:,}[/cyan] wallets with smart money lineage "
+            f"(relaxed threshold: ≥{config.lineage_min_trades_90d} trades vs ≥{config.min_trades_90d})"
+        )
+
+        # ---- Phase 3a: Runner hit count filter ----
         candidates_by_hits = {
             addr: hits
             for addr, hits in wallet_hits.items()
@@ -931,126 +996,129 @@ class WalletQualifier:
             and addr not in already_evaluated
         }
 
-        console.print(
-            f"\n  [bold]Step 3a:[/bold] Runner hit count ≥ {config.min_runner_hits}"
-        )
+        console.print(f"\n  [bold]Phase 3a:[/bold] Runner hit count ≥ {config.min_runner_hits}")
         console.print(
             f"    [green]✓ {len(candidates_by_hits):,} / {len(wallet_hits):,}[/green] passed"
         )
 
-        # ---- Step 3b: SOL balance filter ----
-        task_bal = progress.add_task(
-            f"[cyan]  Step 3b: SOL balance check (≥{config.min_sol_balance} SOL)...",
+        # ---- Phase 3b + 3c: Vybe P&L + trade count gate ----
+        task_pnl = progress.add_task(
+            "[cyan]  Phase 3b/3c: Vybe P&L qualification...",
             total=len(candidates_by_hits),
-        )
-        candidates_with_balance: list[tuple[str, list[EarlyBuyRecord], float]] = []
-
-        # Check balances in batches to avoid hammering RPC
-        wallets = list(candidates_by_hits.items())
-        for i in range(0, len(wallets), config.batch_size):
-            batch = wallets[i: i + config.batch_size]
-            balance_tasks = [self._check_sol_balance(addr) for addr, _ in batch]
-            balances = await asyncio.gather(*balance_tasks, return_exceptions=True)
-
-            for (addr, hits), balance in zip(batch, balances):
-                if isinstance(balance, float) and balance >= config.min_sol_balance:
-                    candidates_with_balance.append((addr, hits, balance))
-                else:
-                    # Save rejected wallet to DB
-                    await _save_wallet_to_db(WalletEvaluation(
-                        wallet_address=addr,
-                        sol_balance=balance if isinstance(balance, float) else 0.0,
-                        runner_hit_count=len(set(r.token_address for r in hits)),
-                        status="REJECTED",
-                        rejection_reason="low_balance",
-                    ))
-                progress.advance(task_bal)
-
-            await asyncio.sleep(config.batch_delay_seconds)
-
-        console.print(
-            f"  [bold]Step 3b:[/bold] SOL balance ≥ {config.min_sol_balance} SOL"
-        )
-        console.print(
-            f"    [green]✓ {len(candidates_with_balance):,} / {len(candidates_by_hits):,}[/green] passed"
-        )
-
-        # ---- Step 3c: Negative control (wallet history analysis) ----
-        task_nc = progress.add_task(
-            "[cyan]  Step 3c: Track record analysis (negative control)...",
-            total=len(candidates_with_balance),
         )
 
         evaluations: list[WalletEvaluation] = []
 
-        for addr, runner_hits, sol_balance in candidates_with_balance:
+        for addr, runner_hits in candidates_by_hits.items():
             runner_hit_count = len(set(r.token_address for r in runner_hits))
-
-            try:
-                nc_runner, nc_dead, nc_neutral, history_hits = await self._run_negative_control(
-                    addr, runner_hits, config
-                )
-            except Exception as e:
-                logger.debug(f"Negative control error for {addr[:8]}: {e}")
-                nc_runner = nc_dead = nc_neutral = 0
-                history_hits = []
-
-            # Combine runner hits from Phase 2 with history classification
-            total_runner = runner_hit_count + nc_runner  # Phase 2 runners count as RUNNER hits
-            total_dead = nc_dead
-            total_classifiable = total_runner + total_dead
-            hit_ratio = total_runner / total_classifiable if total_classifiable > 0 else 0.0
+            lin = lineage_map.get(addr, LineageCheckResult(wallet_address=addr))
 
             eval_result = WalletEvaluation(
                 wallet_address=addr,
-                sol_balance=sol_balance,
-                runner_hit_count=total_runner,
-                dead_hit_count=total_dead,
-                neutral_hit_count=nc_neutral,
-                total_early_buys=total_classifiable,
-                hit_ratio=hit_ratio,
-                history_hits=history_hits,
+                runner_hit_count=runner_hit_count,
+                total_early_buys=runner_hit_count,
+                funded_by_known_smart_money=lin.funded_by_known_smart_money,
+                lineage_parent_wallet=lin.lineage_parent_wallet,
+                lineage_hop_distance=lin.lineage_hop_distance,
             )
 
-            if total_classifiable < config.min_classifiable_buys:
+            # Fetch P&L (Vybe primary, Helius fallback)
+            try:
+                pnl = await pnl_provider.get_wallet_pnl(addr)
+            except Exception as e:
+                logger.debug(f"PnL fetch error for {addr[:8]}: {e}")
+                pnl = PnLResult(wallet_address=addr, is_successful=False)
+
+            # Populate P&L fields regardless of outcome
+            eval_result.realized_pnl_90d_sol = pnl.realized_pnl_90d_sol
+            eval_result.realized_pnl_30d_sol = pnl.realized_pnl_30d_sol
+            eval_result.total_volume_sol = pnl.total_volume_sol
+            eval_result.total_trades_90d = pnl.total_trades_90d
+            eval_result.win_rate_pct = pnl.win_rate_pct
+            eval_result.pnl_provider = pnl.provider
+
+            # Phase 3b: Trade count gate (lineage-aware)
+            effective_min_trades = (
+                config.lineage_min_trades_90d
+                if eval_result.funded_by_known_smart_money
+                else config.min_trades_90d
+            )
+            if pnl.is_successful and pnl.total_trades_90d < effective_min_trades:
                 eval_result.status = "REJECTED"
-                eval_result.rejection_reason = "low_sample"
-            elif hit_ratio < config.min_hit_ratio:
-                eval_result.status = "REJECTED"
-                eval_result.rejection_reason = "low_ratio"
+                eval_result.rejection_reason = (
+                    f"insufficient_trades ({pnl.total_trades_90d} < {effective_min_trades})"
+                )
+                evaluations.append(eval_result)
+                await _save_wallet_to_db(eval_result)
+                progress.advance(task_pnl)
+                await asyncio.sleep(0.05)
+                continue
+
+            # Phase 3c: P&L gate (both 90d and 30d must be positive)
+            if pnl.is_successful:
+                if pnl.realized_pnl_90d_sol <= config.min_pnl_90d_sol:
+                    eval_result.status = "REJECTED"
+                    eval_result.rejection_reason = (
+                        f"negative_pnl_90d ({pnl.realized_pnl_90d_sol:.2f} SOL via {pnl.provider})"
+                    )
+                    evaluations.append(eval_result)
+                    await _save_wallet_to_db(eval_result)
+                    progress.advance(task_pnl)
+                    await asyncio.sleep(0.05)
+                    continue
+                if pnl.realized_pnl_30d_sol <= config.min_pnl_30d_sol:
+                    eval_result.status = "REJECTED"
+                    eval_result.rejection_reason = (
+                        f"negative_pnl_30d ({pnl.realized_pnl_30d_sol:.2f} SOL via {pnl.provider})"
+                    )
+                    evaluations.append(eval_result)
+                    await _save_wallet_to_db(eval_result)
+                    progress.advance(task_pnl)
+                    await asyncio.sleep(0.05)
+                    continue
             else:
-                eval_result.status = "QUALIFIED"
-
-            evaluations.append(eval_result)
-
-            # Checkpoint: save immediately
-            await _save_wallet_to_db(eval_result)
-            if history_hits:
-                await _save_hits_to_db(
-                    [EarlyBuyRecord(
-                        wallet_address=h.wallet_address,
-                        token_address=h.token_address,
-                        token_symbol=h.token_symbol,
-                        buy_amount_sol=h.buy_amount_sol,
-                        entry_time_seconds=h.entry_time_seconds,
-                        bought_at=h.bought_at,
-                    ) for h in history_hits],
-                    source="HISTORY",
+                # P&L provider completely unavailable — still qualify if lineage is strong
+                # (lineage wallets are given benefit of the doubt when all providers fail)
+                if not eval_result.funded_by_known_smart_money:
+                    eval_result.status = "REJECTED"
+                    eval_result.rejection_reason = "pnl_provider_unavailable"
+                    evaluations.append(eval_result)
+                    await _save_wallet_to_db(eval_result)
+                    progress.advance(task_pnl)
+                    await asyncio.sleep(0.05)
+                    continue
+                logger.debug(
+                    f"[Qualify] {addr[:8]}: PnL unavailable but has SM lineage — allowing through"
                 )
 
-            progress.advance(task_nc)
-            await asyncio.sleep(0.1)
+            # All gates passed
+            eval_result.status = "QUALIFIED"
+            eval_result.hit_ratio = 1.0   # meaningful only for legacy reporting
+            evaluations.append(eval_result)
+            await _save_wallet_to_db(eval_result)
+
+            progress.advance(task_pnl)
+            await asyncio.sleep(0.05)
 
         qualified = [e for e in evaluations if e.status == "QUALIFIED"]
-        low_sample = [e for e in evaluations if e.rejection_reason == "low_sample"]
-        low_ratio = [e for e in evaluations if e.rejection_reason == "low_ratio"]
+        rejected_trades = [e for e in evaluations if "insufficient_trades" in e.rejection_reason]
+        rejected_pnl = [e for e in evaluations if "negative_pnl" in e.rejection_reason]
+        rejected_other = [
+            e for e in evaluations
+            if e.status == "REJECTED"
+            and "insufficient_trades" not in e.rejection_reason
+            and "negative_pnl" not in e.rejection_reason
+        ]
 
-        console.print(f"\n  [bold]Step 3c:[/bold] Track record analysis")
+        console.print(f"\n  [bold]Phase 3b/3c:[/bold] Vybe P&L qualification")
         console.print(
-            f"    [yellow]⚠ {len(low_sample):,}[/yellow] rejected: insufficient sample (<{config.min_classifiable_buys} classifiable buys)"
+            f"    [yellow]⚠ {len(rejected_trades):,}[/yellow] rejected: insufficient trades"
         )
         console.print(
-            f"    [yellow]⚠ {len(low_ratio):,}[/yellow] rejected: low runner ratio (<{config.min_hit_ratio:.0%})"
+            f"    [yellow]⚠ {len(rejected_pnl):,}[/yellow] rejected: negative P&L (90d or 30d)"
+        )
+        console.print(
+            f"    [yellow]⚠ {len(rejected_other):,}[/yellow] rejected: other (provider unavailable)"
         )
         console.print(
             f"    [green]✓ {len(qualified):,}[/green] QUALIFIED"
@@ -1065,24 +1133,32 @@ class WalletQualifier:
 
 async def sync_to_smart_money_profiles(qualified: list[WalletEvaluation]) -> int:
     """
-    Insert QUALIFIED wallets into smart_money_profiles as SEED tier
-    so they are immediately usable by the OpportunityScoring engine.
+    Insert QUALIFIED wallets into smart_money_profiles as SEED tier.
+    Populates P&L fields (net_realized_profit_sol, total_volume_sol, win_rate_pct)
+    and lineage_parent_wallet from Phase 2b.
     """
     count = 0
     for eval_result in qualified:
+        lineage_note = (
+            f" | lineage={eval_result.lineage_parent_wallet[:8]}(hop{eval_result.lineage_hop_distance})"
+            if eval_result.lineage_parent_wallet else ""
+        )
         profile = SmartMoneyProfileModel(
             wallet_address=eval_result.wallet_address,
             tier="SEED",
             is_active=True,
-            total_trades_recorded=eval_result.total_early_buys,
-            win_rate_pct=eval_result.hit_ratio * 100.0,
+            total_trades_recorded=eval_result.total_trades_90d,
+            net_realized_profit_sol=eval_result.realized_pnl_90d_sol,
+            total_volume_sol=eval_result.total_volume_sol,
+            win_rate_pct=eval_result.win_rate_pct,
             source="AUTO_DISCOVERY",
             notes=(
                 f"Discovered by discovery engine. "
                 f"runner_hits={eval_result.runner_hit_count}, "
-                f"dead_hits={eval_result.dead_hit_count}, "
-                f"ratio={eval_result.hit_ratio:.2%}, "
-                f"sol_balance={eval_result.sol_balance:.1f}"
+                f"pnl_90d={eval_result.realized_pnl_90d_sol:.2f} SOL, "
+                f"pnl_30d={eval_result.realized_pnl_30d_sol:.2f} SOL, "
+                f"provider={eval_result.pnl_provider}"
+                f"{lineage_note}"
             ),
         )
         ok = await db_manager.upsert_smart_money_wallet(profile)
@@ -1150,11 +1226,11 @@ class DiscoveryOrchestrator:
     async def run(self, resume: bool = False, dry_run: bool = False) -> list[WalletEvaluation]:
         """Execute the full discovery pipeline."""
         console.print(Panel(
-            "[bold cyan]🔍 Smart Money Discovery Engine v1.0[/bold cyan]\n"
+            "[bold cyan]\U0001f50d Smart Money Discovery Engine v2.0[/bold cyan]\n"
             f"Max runners: [bold]{self.config.max_runners:,}[/bold] | "
             f"Min hits: [bold]{self.config.min_runner_hits}[/bold] | "
-            f"Min ratio: [bold]{self.config.min_hit_ratio:.0%}[/bold] | "
-            f"Min SOL: [bold]{self.config.min_sol_balance}[/bold] | "
+            f"Min entry: [bold]{self.config.min_entry_sol} SOL[/bold] | "
+            f"Min trades: [bold]{self.config.min_trades_90d}[/bold] | "
             f"Early window: [bold]{self.config.early_window_seconds // 60} min[/bold]",
             border_style="cyan",
         ))

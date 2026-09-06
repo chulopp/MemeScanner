@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
+from src.config import settings
 from src.database.client import db_manager
 from src.ingestion.schemas import RawTokenEvent
 from src.paper_trading.price_fetcher import fetch_price
@@ -34,7 +35,7 @@ from src.utils.logger import logger
 # FROZEN PARAMETERS — do NOT modify until Day 40
 # ─────────────────────────────────────────────
 FROZEN_PARAMS = {
-    "opportunity_threshold": 60.0,
+    "opportunity_threshold": float(settings.opportunity_threshold),
     "stop_loss_pct": -30.0,           # Hard stop at -30%
     "tp1_pct": 100.0,                 # Take Profit tier 1: +100%
     "tp1_sell_fraction": 0.30,        # Sell 30% of position at TP1
@@ -77,6 +78,7 @@ class ActivePosition:
 
     # MFE (Maximum Favorable Excursion) tracking
     price_high_ever_seen: float = 0.0
+    bonding_curve_address: Optional[str] = None
 
 
 class PositionTracker:
@@ -110,7 +112,8 @@ class PositionTracker:
         self,
         event: RawTokenEvent,
         opportunity_score: float,
-        paper_signal_id: Optional[str] = None
+        paper_signal_id: Optional[str] = None,
+        entry_price: Optional[float] = None,
     ) -> Optional[str]:
         """
         Opens a new virtual position if capacity allows.
@@ -162,12 +165,19 @@ class PositionTracker:
             return None
 
         # ── Fetch Entry Price ──
-        price_snap = await fetch_price(token_address)
-        if not price_snap or price_snap.price_usd <= 0:
+        resolved_price = 0.0
+        bc_addr = getattr(event, "bonding_curve_address", None)
+        price_snap = await fetch_price(token_address, bc_addr)
+        if price_snap and price_snap.price_usd > 0:
+            resolved_price = price_snap.price_usd
+        elif entry_price and entry_price > 0:
+            resolved_price = entry_price
+
+        if resolved_price <= 0:
             logger.warning(f"⚠️ [PositionTracker] Cannot open {symbol} — no price available")
             return None
 
-        entry_price = price_snap.price_usd
+        entry_price = resolved_price
         position_size = FROZEN_PARAMS["position_size_usd"]
 
         # ── Insert to DB ──
@@ -203,6 +213,7 @@ class PositionTracker:
             entry_time=now_utc,
             position_size_usd=position_size,
             price_high_ever_seen=entry_price,
+            bonding_curve_address=bc_addr,
         )
         self._active[position_id] = pos
 
@@ -261,7 +272,7 @@ class PositionTracker:
     async def _evaluate_position(self, pos: ActivePosition) -> None:
         """Fetch current price and evaluate TP/SL conditions for one position."""
         try:
-            snap = await fetch_price(pos.token_address)
+            snap = await fetch_price(pos.token_address, pos.bonding_curve_address)
             if not snap or snap.price_usd <= 0:
                 return
 

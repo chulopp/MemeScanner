@@ -129,9 +129,9 @@ async def _get_client() -> httpx.AsyncClient:
     return _shared_client
 
 
-async def fetch_price(mint: str) -> Optional[PriceSnapshot]:
+async def fetch_price(mint: str, bonding_curve_address: Optional[str] = None) -> Optional[PriceSnapshot]:
     """
-    Fetches current price from 3-tier fallback chain.
+    Fetches current price from multi-tier fallback chain.
     Returns PriceSnapshot or None if all tiers fail.
     """
     client = await _get_client()
@@ -140,6 +140,26 @@ async def fetch_price(mint: str) -> Optional[PriceSnapshot]:
     snap = await _fetch_dexscreener(client, mint)
     if snap:
         return snap
+
+    # Tier 1.5: On-chain Pump.fun Bonding Curve state (instant for newly launched tokens)
+    if bonding_curve_address:
+        try:
+            from src.utils.solana_rpc import solana_rpc
+            from src.utils.price_feed import price_feed
+            bc_data = await solana_rpc.get_bonding_curve_price(bonding_curve_address)
+            if bc_data and not bc_data.get("is_complete"):
+                sol_usd = await price_feed.get_sol_price_usd()
+                price_usd = bc_data.get("price_sol", 0.0) * sol_usd
+                if price_usd > 0:
+                    v_sol = bc_data.get("virtual_sol_reserves", 0) / 1e9
+                    return PriceSnapshot(
+                        price_usd=price_usd,
+                        liquidity_usd=v_sol * sol_usd * 2,
+                        volume_24h_usd=0.0,
+                        source="bonding_curve"
+                    )
+        except Exception as bc_err:
+            logger.debug(f"Bonding curve price fetch failed for {mint[:8]}: {bc_err}")
 
     # Tier 2: Helius DAS
     snap = await _fetch_helius_das(client, mint)
@@ -151,7 +171,7 @@ async def fetch_price(mint: str) -> Optional[PriceSnapshot]:
     if snap:
         return snap
 
-    logger.warning(f"⚠️ All 3 price tiers failed for {mint[:8]}...")
+    logger.warning(f"⚠️ All price tiers failed for {mint[:8]}...")
     return None
 
 

@@ -10,6 +10,7 @@ Paper Trading Live additions (per implementation plan):
 """
 
 import asyncio
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -41,12 +42,14 @@ async def record_signal(
     entry_liq = price_snap.liquidity_usd if price_snap else 0.0
 
     now_utc = datetime.now(tz=timezone.utc).isoformat()
+    signal_id = str(uuid.uuid4())
 
     # Map event.source to signal_source for Pintu A vs Pintu B tracking
     source_raw = getattr(event, "source", "NEW_PAIR") or "NEW_PAIR"
     signal_source = "PINTU_B" if source_raw == "WALLET_TRACKER" else "PINTU_A"
 
     record = {
+        "id": signal_id,
         "token_address": event.token_address,
         "symbol": (event.symbol or "UNKNOWN")[:20],
         "name": (event.name or "")[:60],
@@ -69,8 +72,7 @@ async def record_signal(
     }
 
     try:
-        result = await db_manager.insert("paper_signals", record)
-        signal_id = result[0]["id"] if result and len(result) > 0 else None
+        await db_manager.insert("paper_signals", record)
 
         signal_type = "BASELINE" if is_baseline else "SIGNAL"
         logger.info(
@@ -92,7 +94,7 @@ async def record_signal(
                 launch_venue=event.launch_venue,
                 is_baseline=False
             )
-            if msg_id and signal_id:
+            if msg_id:
                 await db_manager.update(
                     "paper_signals",
                     {"telegram_message_id": msg_id},
@@ -100,8 +102,7 @@ async def record_signal(
                 )
 
             # Paper Trading Live: open virtual position
-            if signal_id:
-                asyncio.create_task(_open_virtual_position(event, score, signal_id))
+            asyncio.create_task(_open_virtual_position(event, score, signal_id, entry_price))
 
         return signal_id
 
@@ -114,6 +115,7 @@ async def _open_virtual_position(
     event: RawTokenEvent,
     opportunity_score: float,
     signal_id: str,
+    entry_price: Optional[float] = None,
 ) -> None:
     """
     Background task: open a virtual position in PositionTracker.
@@ -125,6 +127,7 @@ async def _open_virtual_position(
             event=event,
             opportunity_score=opportunity_score,
             paper_signal_id=signal_id,
+            entry_price=entry_price,
         )
     except Exception as e:
         logger.warning(f"[SignalRecorder] open_virtual_position failed for {event.token_address[:8]}: {e}")

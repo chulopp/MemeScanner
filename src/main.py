@@ -16,6 +16,13 @@ if hasattr(sys.stderr, "reconfigure"):
     except Exception:
         pass
 
+# Ensure project root is in sys.path so `python src/main.py` works anywhere
+import os
+from pathlib import Path
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 from src.config import settings
 from src.ingestion.manager import IngestionManager
 from src.ingestion.schemas import RawTokenEvent

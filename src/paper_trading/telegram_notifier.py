@@ -22,7 +22,7 @@ from src.utils.logger import logger
 
 # Guard import — python-telegram-bot is optional during testing
 try:
-    from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram import Bot, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
     TELEGRAM_AVAILABLE = True
 except ImportError:
     TELEGRAM_AVAILABLE = False
@@ -451,21 +451,59 @@ class TelegramNotifier:
         if not self._bot:
             return
 
-        logger.info("🤖 [Telegram] Starting command listener (read-only: /status /pnl /positions /checkpoint_now)")
+        # Register official Telegram Bot Menu shortcuts
+        try:
+            from telegram import BotCommand
+            commands = [
+                BotCommand("menu", "🔘 Buka menu shortcut tombol"),
+                BotCommand("status", "🤖 Status bot & kapasitas posisi"),
+                BotCommand("positions", "📊 Daftar posisi aktif & floating MFE"),
+                BotCommand("pnl", "💰 Ringkasan performa & win rate"),
+                BotCommand("checkpoint_now", "📋 Laporan audit checkpoint"),
+            ]
+            await self._bot.set_my_commands(commands)
+            logger.info("🤖 [Telegram] Menu commands registered with BotFather API.")
+        except Exception as cmd_err:
+            logger.debug(f"[Telegram] Failed to register menu commands: {cmd_err}")
+
+        logger.info("🤖 [Telegram] Starting command listener (commands: /menu /status /pnl /positions /checkpoint_now)")
         asyncio.create_task(self._command_poll_loop())
 
     async def _command_poll_loop(self) -> None:
-        """Long-poll Telegram for incoming messages and route commands."""
+        """Long-poll Telegram for incoming messages and callback queries."""
         last_update_id: Optional[int] = None
         while True:
             try:
                 updates = await self._bot.get_updates(
                     offset=last_update_id,
                     timeout=30,
-                    allowed_updates=["message"]
+                    allowed_updates=["message", "callback_query"]
                 )
                 for update in updates:
                     last_update_id = update.update_id + 1
+
+                    # Handle inline button taps (callback queries)
+                    if update.callback_query:
+                        cb = update.callback_query
+                        try:
+                            await cb.answer()
+                        except Exception:
+                            pass
+                        cb_chat = cb.message.chat_id if cb.message else int(self._chat_id)
+                        if str(cb_chat) == self._chat_id:
+                            action = cb.data or ""
+                            if action == "cmd_status":
+                                asyncio.create_task(self._cmd_status(cb_chat))
+                            elif action == "cmd_positions":
+                                asyncio.create_task(self._cmd_positions(cb_chat))
+                            elif action == "cmd_pnl":
+                                asyncio.create_task(self._cmd_pnl(cb_chat))
+                            elif action == "cmd_checkpoint":
+                                asyncio.create_task(self._cmd_checkpoint(cb_chat))
+                            elif action == "cmd_menu":
+                                asyncio.create_task(self._cmd_menu(cb_chat))
+                        continue
+
                     message = update.message
                     if not message or not message.text:
                         continue
@@ -475,13 +513,15 @@ class TelegramNotifier:
                     if chat_id != self._chat_id:
                         continue
 
-                    if text.startswith("/status"):
+                    if text.startswith(("/start", "/menu", "menu")):
+                        asyncio.create_task(self._cmd_menu(message.chat.id))
+                    elif text.startswith(("/status", "🤖 status")):
                         asyncio.create_task(self._cmd_status(message.chat.id))
-                    elif text.startswith("/pnl"):
+                    elif text.startswith(("/pnl", "💰 pnl")):
                         asyncio.create_task(self._cmd_pnl(message.chat.id))
-                    elif text.startswith("/positions"):
+                    elif text.startswith(("/positions", "📊 posisi aktif")):
                         asyncio.create_task(self._cmd_positions(message.chat.id))
-                    elif text.startswith("/checkpoint_now"):
+                    elif text.startswith(("/checkpoint_now", "📋 audit checkpoint")):
                         asyncio.create_task(self._cmd_checkpoint(message.chat.id))
 
             except Exception as e:
@@ -563,6 +603,48 @@ class TelegramNotifier:
             await self._bot.send_message(chat_id=chat_id, text=report, parse_mode="HTML")
         except Exception as e:
             logger.debug(f"[Telegram] /checkpoint_now error: {e}")
+
+    async def _cmd_menu(self, chat_id: int) -> None:
+        """Kirim menu interaktif dengan tombol Inline dan Keyboard Shortcuts."""
+        try:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+
+            # 1. Inline Buttons (di dalam bubble chat)
+            inline_kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🤖 Status Bot", callback_data="cmd_status"),
+                    InlineKeyboardButton("📊 Posisi Aktif", callback_data="cmd_positions"),
+                ],
+                [
+                    InlineKeyboardButton("💰 Ringkasan PnL", callback_data="cmd_pnl"),
+                    InlineKeyboardButton("📋 Audit Checkpoint", callback_data="cmd_checkpoint"),
+                ]
+            ])
+
+            # 2. Reply Keyboard (shortcut permanen di bawah input keyboard HP)
+            reply_kb = ReplyKeyboardMarkup([
+                [KeyboardButton("🤖 Status"), KeyboardButton("📊 Posisi Aktif")],
+                [KeyboardButton("💰 PnL"), KeyboardButton("📋 Audit Checkpoint")]
+            ], resize_keyboard=True)
+
+            text = (
+                "🎯 <b>MemeScanner Quick Menu</b>\n\n"
+                "Pilih shortcut di bawah ini untuk melihat data live:"
+            )
+            await self._bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=inline_kb
+            )
+            await self._bot.send_message(
+                chat_id=chat_id,
+                text="<i>⚡ Keyboard shortcut diaktifkan di bawah chat bar.</i>",
+                parse_mode="HTML",
+                reply_markup=reply_kb
+            )
+        except Exception as e:
+            logger.debug(f"[Telegram] /menu error: {e}")
 
 
 telegram_notifier = TelegramNotifier()

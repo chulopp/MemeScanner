@@ -68,7 +68,8 @@ class PumpSafetyFilter:
         )
 
         flags_count = scalp_results.get("flags_count", 0)
-        if flags_count >= 2:
+        has_market_anomaly = bool(scalp_results.get("scalp_flag_gas_spike") or scalp_results.get("scalp_flag_pump_anomaly"))
+        if flags_count >= 3 or (flags_count >= 2 and has_market_anomaly):
             rejections.append(f"Instant Scalp Risk: {flags_count} flags triggered ({scalp_results.get('details')})")
 
         filter_pass = len(rejections) == 0

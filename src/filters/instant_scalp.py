@@ -46,32 +46,36 @@ class InstantScalpFilter:
         if top_holder_pubkeys:
             young_wallets = 0
             low_balance_wallets = 0
-            checked_count = 0
+            checked_age_count = 0
+            checked_bal_count = 0
 
             for pubkey in top_holder_pubkeys[:3]:
                 if not pubkey or len(pubkey) < 32:
                     continue
-                checked_count += 1
                 try:
                     # Check age
                     age_days = await solana_rpc.get_wallet_age_days(pubkey)
-                    if 0.0 <= age_days < 1.0:
-                        young_wallets += 1
+                    if age_days is not None:
+                        checked_age_count += 1
+                        if 0.0 <= age_days < 1.0:
+                            young_wallets += 1
 
                     # Check SOL balance
                     balance_sol = await solana_rpc.get_sol_balance(pubkey)
-                    if balance_sol < 0.2:
-                        low_balance_wallets += 1
+                    if balance_sol is not None:
+                        checked_bal_count += 1
+                        if balance_sol < 0.2:
+                            low_balance_wallets += 1
                 except Exception as e:
                     logger.debug(f"Error evaluating holder {pubkey}: {e}")
 
-            if checked_count > 0 and (young_wallets / checked_count) >= 0.5:
+            if checked_age_count > 0 and (young_wallets / checked_age_count) >= 0.5:
                 flags["scalp_flag_young_wallet"] = True
-                flags["details"]["young_wallets"] = f"{young_wallets}/{checked_count} < 1 day old"
+                flags["details"]["young_wallets"] = f"{young_wallets}/{checked_age_count} < 1 day old"
 
-            if checked_count > 0 and (low_balance_wallets / checked_count) >= 0.5:
+            if checked_bal_count > 0 and (low_balance_wallets / checked_bal_count) >= 0.5:
                 flags["scalp_flag_low_balance"] = True
-                flags["details"]["low_balance"] = f"{low_balance_wallets}/{checked_count} < 0.2 SOL"
+                flags["details"]["low_balance"] = f"{low_balance_wallets}/{checked_bal_count} < 0.2 SOL"
 
         # 4. Deployment Pump Anomaly Check
         dev_buy_ratio = (initial_buy_tokens / total_supply) if total_supply > 0 else 0

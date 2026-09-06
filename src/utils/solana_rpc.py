@@ -11,10 +11,12 @@ from src.utils.logger import logger
 class SolanaRpcClient:
     """Async Solana RPC client with rate-limiting and robust error handling."""
 
-    def __init__(self, rpc_url: Optional[str] = None, max_concurrency: int = 15):
+    def __init__(self, rpc_url: Optional[str] = None, max_concurrency: int = 5):
         self.rpc_url = rpc_url or settings.helius_rpc_url
         self.semaphore = asyncio.Semaphore(max_concurrency)
         self._client: Optional[httpx.AsyncClient] = None
+        self._fee_cache: list[int] = []
+        self._fee_cache_ts: float = 0.0
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -41,8 +43,8 @@ class SolanaRpcClient:
                             return None
                         return data.get("result")
                     elif response.status_code == 429:
-                        # Rate limit backoff
-                        await asyncio.sleep(0.2 * (2 ** attempt))
+                        # Rate limit backoff: 0.5s, 1.0s, 2.0s
+                        await asyncio.sleep(0.5 * (2 ** attempt))
                     else:
                         logger.debug(f"RPC HTTP {response.status_code} for {method}")
                 except Exception as e:
@@ -105,14 +107,14 @@ class SolanaRpcClient:
         res = await self._rpc_call("getTokenLargestAccounts", [mint_address])
         return res.get("value", []) if res else []
 
-    async def get_sol_balance(self, pubkey: str) -> float:
-        """Returns SOL balance in SOL (float)."""
+    async def get_sol_balance(self, pubkey: str) -> Optional[float]:
+        """Returns SOL balance in SOL (float), or None if unavailable/RPC failed."""
         res = await self._rpc_call("getBalance", [pubkey])
         if res and "value" in res:
             return res["value"] / 1_000_000_000.0
-        return 0.0
+        return None
 
-    async def get_signatures_for_address(self, pubkey: str, limit: int = 50) -> list[dict]:
+    async def get_signatures_for_address(self, pubkey: str, limit: int = 20) -> list[dict]:
         """Returns transaction signatures list for an address."""
         res = await self._rpc_call(
             "getSignaturesForAddress",
@@ -120,20 +122,20 @@ class SolanaRpcClient:
         )
         return res if isinstance(res, list) else []
 
-    async def get_wallet_age_days(self, pubkey: str) -> float:
+    async def get_wallet_age_days(self, pubkey: str) -> Optional[float]:
         """
         Estimates wallet age in days based on earliest available transaction blockTime.
-        Returns 0.0 if fresh (<1 day) or unavailable.
+        Returns None if unavailable/RPC failed, or float days if resolved.
         """
-        signatures = await self.get_signatures_for_address(pubkey, limit=100)
+        signatures = await self.get_signatures_for_address(pubkey, limit=20)
         if not signatures:
-            return 0.0
+            return None
 
         # Signatures are returned newest-to-oldest. Last item is the oldest in batch.
         oldest_tx = signatures[-1]
         block_time = oldest_tx.get("blockTime")
         if not block_time:
-            return 0.0
+            return None
 
         age_seconds = time.time() - block_time
         return age_seconds / 86400.0
@@ -211,13 +213,21 @@ class SolanaRpcClient:
     async def get_recent_prioritization_fees(self, addresses: Optional[list[str]] = None) -> list[int]:
         """
         Returns list of recent prioritization fees in micro-lamports.
-        If addresses list is provided, returns prioritization fees specific to those accounts.
+        Cached for 30s to prevent spamming Helius RPC.
         """
+        now = time.time()
+        if not addresses and (now - self._fee_cache_ts) < 30.0 and self._fee_cache:
+            return self._fee_cache
+
         params = [addresses] if addresses else []
         res = await self._rpc_call("getRecentPrioritizationFees", params)
         if res and isinstance(res, list):
-            return [item.get("prioritizationFee", 0) for item in res]
-        return []
+            fees = [item.get("prioritizationFee", 0) for item in res]
+            if not addresses:
+                self._fee_cache = fees
+                self._fee_cache_ts = now
+            return fees
+        return self._fee_cache or []
 
     async def close(self):
         if self._client and not self._client.is_closed:

@@ -65,6 +65,25 @@ class TelegramNotifier:
         if self._bot is None and self._enabled:
             self._bot = Bot(token=settings.telegram_bot_token)
 
+    async def send_text(self, text: str, parse_mode: str = "HTML") -> bool:
+        """Kirim pesan teks umum ke chat yang dikonfigurasi."""
+        if not self._enabled:
+            return False
+        self._ensure_bot()
+        if not self._bot:
+            return False
+        try:
+            await self._bot.send_message(
+                chat_id=self._chat_id,
+                text=text,
+                parse_mode=parse_mode,
+                disable_web_page_preview=True
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to send Telegram text message: {e}")
+            return False
+
     async def send_signal_notification(
         self,
         token_address: str,

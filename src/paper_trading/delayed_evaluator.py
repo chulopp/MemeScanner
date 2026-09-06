@@ -31,6 +31,10 @@ STAGE1_CACHE_PREFIX = "stage1_cache:"
 DELAY_SECONDS = 120.0   # T+2 minutes
 POLL_INTERVAL = 5.0     # Worker poll interval
 
+# Reference to frozen parameters — do NOT change before Checkpoint Day 40
+# (authoritative source: src.paper_trading.position_tracker.FROZEN_PARAMS)
+OPPORTUNITY_THRESHOLD = 60.0   # Frozen entry threshold
+
 
 class DelayedEvaluator:
     """

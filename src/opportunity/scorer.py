@@ -30,6 +30,9 @@ class OpportunityScoreResult(BaseModel):
     metric_snapshot: Optional[MetricSnapshotModel] = None
 
 
+_RAW_FACTOR_CACHE: dict[str, tuple[dict[str, Optional[float]], dict[str, Any], Any, Any, Any, Any, Any]] = {}
+
+
 class OpportunityScorer:
     """
     Multi-Factor Opportunity Scoring Engine [Fase 3].
@@ -39,10 +42,80 @@ class OpportunityScorer:
     Dynamically redistributes weights among active components if a component is unavailable/failed.
     """
 
+    @classmethod
+    def clear_cache(cls):
+        """Clears the in-memory raw factor cache."""
+        _RAW_FACTOR_CACHE.clear()
+
+    @classmethod
+    def load_cache_from_disk(cls, filepath: str = "backtest_results/score_cache.json") -> int:
+        """Loads persistent factor cache from disk if available."""
+        import json, os
+        if not os.path.exists(filepath):
+            return 0
+        try:
+            with open(filepath, "r") as f:
+                data = json.load(f)
+            count = 0
+            for token_addr, item in data.items():
+                vol_d = item.get("vol_data")
+                vol_res = None
+                if vol_d:
+                    vol_res = VolumeVelocityResult(
+                        score=item["component_scores"].get("vol_velocity") or 0.0,
+                        buy_count=vol_d["buy_count"],
+                        sell_count=vol_d["sell_count"],
+                        buy_volume_sol=vol_d["buy_volume_sol"],
+                        sell_volume_sol=vol_d["sell_volume_sol"],
+                        net_buy_pressure_ratio=vol_d["net_buy_pressure_ratio"]
+                    )
+                fee_d = item.get("fee_data")
+                fee_res = None
+                if fee_d:
+                    fee_res = GlobalFeeResult(
+                        score=item["component_scores"].get("global_fee") or 0.0,
+                        median_fee_micro_lamports=fee_d["median_fee_micro_lamports"],
+                        max_fee_micro_lamports=fee_d["median_fee_micro_lamports"] * 2,
+                        p90_fee_micro_lamports=fee_d["median_fee_micro_lamports"],
+                        valid_fee_sample_count=10
+                    )
+                holder_d = item.get("holder_data")
+                holder_res = None
+                if holder_d:
+                    holder_res = HolderCurveResult(
+                        score=item["component_scores"].get("holder_curve") or 0.0,
+                        bonding_curve_pct=holder_d["bonding_curve_pct"],
+                        unique_holders_count=holder_d["unique_holders_count"]
+                    )
+                social_d = item.get("social_data")
+                social_res = None
+                if social_d:
+                    social_res = SocialMetaResult(
+                        score=item["component_scores"].get("social_meta") or 0.0,
+                        dexscreener_boosted=social_d["dexscreener_boosted"],
+                        dexscreener_paid=social_d["dexscreener_paid"]
+                    )
+                _RAW_FACTOR_CACHE[token_addr] = (
+                    item["component_scores"],
+                    item["breakdown"],
+                    vol_res,
+                    None,
+                    fee_res,
+                    holder_res,
+                    social_res
+                )
+                count += 1
+            logger.info(f"Loaded {count} cached factor score profiles from {filepath}")
+            return count
+        except Exception as e:
+            logger.debug(f"Failed to load cache from {filepath}: {e}")
+            return 0
+
     async def score_token(
         self,
         event: RawTokenEvent,
-        candidate_wallets: Optional[list[str]] = None
+        candidate_wallets: Optional[list[str]] = None,
+        use_cache: bool = False
     ) -> OpportunityScoreResult:
         """
         Executes concurrent opportunity scoring across all 5 multi-factor engines.
@@ -52,29 +125,120 @@ class OpportunityScorer:
         if event.deployer_wallet_address and event.deployer_wallet_address not in wallets_to_check:
             wallets_to_check.append(event.deployer_wallet_address)
 
-        # Run all 5 scoring components concurrently
-        vol_task = volume_velocity_engine.calculate_velocity(
-            mint_address=token_addr,
-            initial_buy_sol=event.initial_sol_liquidity
-        )
-        smart_task = smart_money_engine.evaluate_token_smart_money(
-            candidate_wallet_addresses=wallets_to_check
-        )
-        fee_task = global_fee_engine.calculate_fee_urgency(
-            mint_address=token_addr
-        )
-        holder_task = holder_curve_engine.evaluate_holder_curve(
-            event=event,
-            candidate_wallets=wallets_to_check
-        )
-        social_task = social_meta_engine.evaluate_social_meta(
-            event=event,
-            total_volume_sol=event.initial_sol_liquidity
-        )
+        if use_cache and not _RAW_FACTOR_CACHE:
+            self.load_cache_from_disk()
 
-        vol_res, smart_res, fee_res, holder_res, social_res = await asyncio.gather(
-            vol_task, smart_task, fee_task, holder_task, social_task, return_exceptions=True
-        )
+        if use_cache and token_addr in _RAW_FACTOR_CACHE:
+            component_scores, breakdown, vol_res, smart_res, fee_res, holder_res, social_res = _RAW_FACTOR_CACHE[token_addr]
+        else:
+            # Run all 5 scoring components concurrently
+            vol_task = volume_velocity_engine.calculate_velocity(
+                mint_address=token_addr,
+                initial_buy_sol=event.initial_sol_liquidity
+            )
+            smart_task = smart_money_engine.evaluate_token_smart_money(
+                candidate_wallet_addresses=wallets_to_check
+            )
+            fee_task = global_fee_engine.calculate_fee_urgency(
+                mint_address=token_addr
+            )
+            holder_task = holder_curve_engine.evaluate_holder_curve(
+                event=event,
+                candidate_wallets=wallets_to_check
+            )
+            social_task = social_meta_engine.evaluate_social_meta(
+                event=event,
+                total_volume_sol=event.initial_sol_liquidity
+            )
+
+            vol_res, smart_res, fee_res, holder_res, social_res = await asyncio.gather(
+                vol_task, smart_task, fee_task, holder_task, social_task, return_exceptions=True
+            )
+
+            component_scores: dict[str, Optional[float]] = {
+                "vol_velocity": None,
+                "smart_money": None,
+                "global_fee": None,
+                "holder_curve": None,
+                "social_meta": None
+            }
+
+            breakdown: dict[str, Any] = {}
+
+            # 1. Volume Velocity
+            if isinstance(vol_res, VolumeVelocityResult) and vol_res.is_successful:
+                component_scores["vol_velocity"] = vol_res.score
+                breakdown["vol_velocity"] = {
+                    "score": vol_res.score,
+                    "buy_count": vol_res.buy_count,
+                    "sell_count": vol_res.sell_count,
+                    "net_buy_pressure_ratio": vol_res.net_buy_pressure_ratio,
+                    "buy_vol_sol": vol_res.buy_volume_sol
+                }
+            else:
+                logger.debug(f"Volume velocity unavailable for {token_addr[:8]}: {vol_res}")
+
+            # 2. Smart Money
+            if isinstance(smart_res, SmartMoneyMatchResult) and smart_res.is_successful:
+                if smart_res.matched_wallets_count > 0:
+                    component_scores["smart_money"] = smart_res.score
+                else:
+                    # When no smart money wallets matched, redistribute the 30% weight
+                    # across active components so tokens are not penalized -30 points from birth
+                    component_scores["smart_money"] = None
+
+                breakdown["smart_money"] = {
+                    "score": smart_res.score,
+                    "matched_count": smart_res.matched_wallets_count,
+                    "matched_wallets": smart_res.matched_wallets,
+                    "total_tracked": smart_res.total_tracked_wallets
+                }
+            else:
+                logger.debug(f"Smart money match unavailable for {token_addr[:8]}: {smart_res}")
+
+            # 3. Global Fee Urgency
+            if isinstance(fee_res, GlobalFeeResult) and fee_res.is_successful:
+                component_scores["global_fee"] = fee_res.score
+                breakdown["global_fee"] = {
+                    "score": fee_res.score,
+                    "median_fee": fee_res.median_fee_micro_lamports,
+                    "max_fee": fee_res.max_fee_micro_lamports,
+                    "is_wash_trade_suspected": fee_res.is_wash_trade_suspected
+                }
+            else:
+                logger.debug(f"Global fee urgency unavailable for {token_addr[:8]}: {fee_res}")
+
+            # 4. Holder Curve
+            if isinstance(holder_res, HolderCurveResult) and holder_res.is_successful:
+                component_scores["holder_curve"] = holder_res.score
+                breakdown["holder_curve"] = {
+                    "score": holder_res.score,
+                    "bonding_curve_pct": holder_res.bonding_curve_pct,
+                    "unique_holders_count": holder_res.unique_holders_count,
+                    "top_holder_concentration_pct": holder_res.top_holder_concentration_pct,
+                    "provider_used": holder_res.provider_used
+                }
+            else:
+                logger.debug(f"Holder curve unavailable for {token_addr[:8]}: {holder_res}")
+
+            # 5. Social Meta
+            if isinstance(social_res, SocialMetaResult) and social_res.is_successful:
+                component_scores["social_meta"] = social_res.score
+                breakdown["social_meta"] = {
+                    "score": social_res.score,
+                    "has_twitter": social_res.has_twitter,
+                    "has_telegram": social_res.has_telegram,
+                    "has_website": social_res.has_website,
+                    "dexscreener_paid": social_res.dexscreener_paid,
+                    "dexscreener_boosted": social_res.dexscreener_boosted,
+                    "boost_count": social_res.boost_count,
+                    "suspicious_artificial_boost": social_res.suspicious_artificial_boost
+                }
+            else:
+                logger.debug(f"Social meta unavailable for {token_addr[:8]}: {social_res}")
+
+            if use_cache:
+                _RAW_FACTOR_CACHE[token_addr] = (component_scores, breakdown, vol_res, smart_res, fee_res, holder_res, social_res)
 
         # Base hypothesis weights [HIPOTESIS_AWAL]
         base_weights = {
@@ -84,89 +248,6 @@ class OpportunityScorer:
             "holder_curve": settings.score_w_holder_curve,
             "social_meta": settings.score_w_social_meta
         }
-
-        component_scores: dict[str, Optional[float]] = {
-            "vol_velocity": None,
-            "smart_money": None,
-            "global_fee": None,
-            "holder_curve": None,
-            "social_meta": None
-        }
-
-        breakdown: dict[str, Any] = {}
-
-        # 1. Volume Velocity
-        if isinstance(vol_res, VolumeVelocityResult) and vol_res.is_successful:
-            component_scores["vol_velocity"] = vol_res.score
-            breakdown["vol_velocity"] = {
-                "score": vol_res.score,
-                "buy_count": vol_res.buy_count,
-                "sell_count": vol_res.sell_count,
-                "net_buy_pressure_ratio": vol_res.net_buy_pressure_ratio,
-                "buy_vol_sol": vol_res.buy_volume_sol
-            }
-        else:
-            logger.debug(f"Volume velocity unavailable for {token_addr[:8]}: {vol_res}")
-
-        # 2. Smart Money
-        if isinstance(smart_res, SmartMoneyMatchResult) and smart_res.is_successful:
-            if smart_res.matched_wallets_count > 0:
-                component_scores["smart_money"] = smart_res.score
-            else:
-                # When no smart money wallets matched, redistribute the 30% weight
-                # across active components so tokens are not penalized -30 points from birth
-                component_scores["smart_money"] = None
-
-            breakdown["smart_money"] = {
-                "score": smart_res.score,
-                "matched_count": smart_res.matched_wallets_count,
-                "matched_wallets": smart_res.matched_wallets,
-                "total_tracked": smart_res.total_tracked_wallets
-            }
-        else:
-            logger.debug(f"Smart money match unavailable for {token_addr[:8]}: {smart_res}")
-
-
-        # 3. Global Fee Urgency
-        if isinstance(fee_res, GlobalFeeResult) and fee_res.is_successful:
-            component_scores["global_fee"] = fee_res.score
-            breakdown["global_fee"] = {
-                "score": fee_res.score,
-                "median_fee": fee_res.median_fee_micro_lamports,
-                "max_fee": fee_res.max_fee_micro_lamports,
-                "is_wash_trade_suspected": fee_res.is_wash_trade_suspected
-            }
-        else:
-            logger.debug(f"Global fee urgency unavailable for {token_addr[:8]}: {fee_res}")
-
-        # 4. Holder Curve
-        if isinstance(holder_res, HolderCurveResult) and holder_res.is_successful:
-            component_scores["holder_curve"] = holder_res.score
-            breakdown["holder_curve"] = {
-                "score": holder_res.score,
-                "bonding_curve_pct": holder_res.bonding_curve_pct,
-                "unique_holders_count": holder_res.unique_holders_count,
-                "top_holder_concentration_pct": holder_res.top_holder_concentration_pct,
-                "provider_used": holder_res.provider_used
-            }
-        else:
-            logger.debug(f"Holder curve unavailable for {token_addr[:8]}: {holder_res}")
-
-        # 5. Social Meta
-        if isinstance(social_res, SocialMetaResult) and social_res.is_successful:
-            component_scores["social_meta"] = social_res.score
-            breakdown["social_meta"] = {
-                "score": social_res.score,
-                "has_twitter": social_res.has_twitter,
-                "has_telegram": social_res.has_telegram,
-                "has_website": social_res.has_website,
-                "dexscreener_paid": social_res.dexscreener_paid,
-                "dexscreener_boosted": social_res.dexscreener_boosted,
-                "boost_count": social_res.boost_count,
-                "suspicious_artificial_boost": social_res.suspicious_artificial_boost
-            }
-        else:
-            logger.debug(f"Social meta unavailable for {token_addr[:8]}: {social_res}")
 
         # Active components with valid scores
         active_comps = [k for k, v in component_scores.items() if v is not None]

@@ -1,7 +1,15 @@
 """
-Telegram Notifier — Fase 5 (Stage 1 Fast-Path)
+Telegram Notifier — Fase 5 (Paper Trading Live)
 Sends instant Telegram notification when a signal is generated.
 Target latency: ≤ 5 seconds from signal generation.
+
+Paper Trading Live additions:
+  - send_position_opened(): notif saat virtual position dibuka
+  - send_tp_hit(): notif saat TP1/TP2/TP3 triggered
+  - send_sl_hit(): notif saat hard stop loss triggered
+  - send_trailing_stop_hit(): notif saat moonbag trailing stop triggered
+  - setup_command_listener(): read-only Telegram bot commands
+    (/status, /pnl, /positions, /checkpoint_now)
 
 Stage 2 (LLM synthesis / message edit) is deferred to Fase 6.
 """
@@ -238,7 +246,7 @@ class TelegramNotifier:
         if not self._bot:
             return None
 
-        status_emoji = {"runner": "🚀", "dead": "💀", "neutral": "➖"}.get(status, "❓")
+        status_emoji = {"runner": "🚀", "dead": "💀", "neutral": "⟶"}.get(status, "❓")
 
         text = (
             f"📋 Outcome [{time_window}]: ${symbol}\n"
@@ -261,6 +269,281 @@ class TelegramNotifier:
         except Exception as e:
             logger.debug(f"Telegram outcome update failed: {e}")
             return None
+
+    # ──────────────────────────────────────────
+    # Paper Trading Live: position lifecycle notifications
+    # ──────────────────────────────────────────
+
+    async def send_position_opened(
+        self,
+        symbol: str,
+        token_address: str,
+        signal_source: str,
+        entry_price: float,
+        opportunity_score: float,
+        position_size: float,
+    ) -> None:
+        """Notif saat virtual position baru dibuka."""
+        if not self._enabled:
+            return
+        self._ensure_bot()
+        if not self._bot:
+            return
+
+        import html as _html
+        source_emoji = "🔵" if signal_source == "PINTU_B" else "🟢"
+        price_display = f"${entry_price:.8f}" if entry_price < 0.01 else f"${entry_price:.6f}"
+        text = (
+            f"📂 <b>Posisi Dibuka</b>: ${_html.escape(symbol)}\n"
+            f"<code>{token_address}</code>\n"
+            f"\n"
+            f"{source_emoji} Sumber: <b>{signal_source}</b>\n"
+            f"💰 Entry: <b>{price_display}</b>\n"
+            f"💵 Ukuran Posisi: <b>${position_size:.2f}</b>\n"
+            f"📊 Score: <b>{opportunity_score:.1f}/100</b>"
+        )
+        try:
+            await self._bot.send_message(
+                chat_id=self._chat_id, text=text, parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+        except Exception as e:
+            logger.debug(f"send_position_opened failed: {e}")
+
+    async def send_tp_hit(
+        self,
+        symbol: str,
+        token_address: str,
+        tier: str,
+        return_pct: float,
+        sell_fraction: float,
+        remaining_fraction: float,
+    ) -> None:
+        """Notif saat TP1/TP2/TP3 triggered (partial sell)."""
+        if not self._enabled:
+            return
+        self._ensure_bot()
+        if not self._bot:
+            return
+
+        import html as _html
+        tier_emoji = {"TP1": "✅", "TP2": "📚", "TP3": "💎"}.get(tier, "🎯")
+        text = (
+            f"{tier_emoji} <b>{tier} Hit</b>: ${_html.escape(symbol)}\n"
+            f"<code>{token_address[:20]}...</code>\n"
+            f"\n"
+            f"📈 Return saat ini: <b>{return_pct:+.1f}%</b>\n"
+            f"💰 Dijual: <b>{sell_fraction*100:.0f}% posisi</b>\n"
+            f"🔒 Sisa di-hold: <b>{remaining_fraction*100:.0f}%</b>"
+        )
+        try:
+            await self._bot.send_message(
+                chat_id=self._chat_id, text=text, parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+        except Exception as e:
+            logger.debug(f"send_tp_hit failed: {e}")
+
+    async def send_sl_hit(
+        self,
+        symbol: str,
+        token_address: str,
+        return_pct: float,
+        hold_minutes: float,
+    ) -> None:
+        """Notif saat hard stop loss triggered."""
+        if not self._enabled:
+            return
+        self._ensure_bot()
+        if not self._bot:
+            return
+
+        import html as _html
+        text = (
+            f"🛑 <b>Stop Loss</b>: ${_html.escape(symbol)}\n"
+            f"<code>{token_address[:20]}...</code>\n"
+            f"\n"
+            f"📉 Return: <b>{return_pct:+.1f}%</b>\n"
+            f"⏱ Di-hold: <b>{hold_minutes:.0f} menit</b>\n"
+            f"⚠️ <i>Disclaimer: angka ini dari polling 30s, bisa 10-30% lebih buruk di pasar nyata.</i>"
+        )
+        try:
+            await self._bot.send_message(
+                chat_id=self._chat_id, text=text, parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+        except Exception as e:
+            logger.debug(f"send_sl_hit failed: {e}")
+
+    async def send_trailing_stop_hit(
+        self,
+        symbol: str,
+        token_address: str,
+        return_pct: float,
+        mfe_pct: float,
+    ) -> None:
+        """Notif saat moonbag trailing stop triggered."""
+        if not self._enabled:
+            return
+        self._ensure_bot()
+        if not self._bot:
+            return
+
+        import html as _html
+        captured_ratio = return_pct / mfe_pct * 100.0 if mfe_pct > 0.1 else 0.0
+        text = (
+            f"🌙 <b>Trailing Stop (Moonbag)</b>: ${_html.escape(symbol)}\n"
+            f"<code>{token_address[:20]}...</code>\n"
+            f"\n"
+            f"🏔 MFE (puncak tertinggi): <b>{mfe_pct:+.1f}%</b>\n"
+            f"📈 Return terealisasi: <b>{return_pct:+.1f}%</b>\n"
+            f"🎯 Captured: <b>{captured_ratio:.0f}% dari potensi</b>"
+        )
+        try:
+            await self._bot.send_message(
+                chat_id=self._chat_id, text=text, parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+        except Exception as e:
+            logger.debug(f"send_trailing_stop_hit failed: {e}")
+
+    # ──────────────────────────────────────────
+    # Read-only Telegram command listener
+    # ──────────────────────────────────────────
+
+    async def setup_command_listener(self) -> None:
+        """
+        Start polling-based Telegram command listener.
+
+        Available read-only commands (FROZEN during parameter freeze window):
+          /status        — Show active positions count and bot uptime
+          /pnl           — PnL summary (calls CheckpointReporter quick summary)
+          /positions     — List all currently open positions
+          /checkpoint_now — Full checkpoint report
+
+        NOTE: No parameter-changing commands are registered.
+        /pause, /settp, /setsl, /threshold are intentionally ABSENT.
+        """
+        if not self._enabled or not TELEGRAM_AVAILABLE:
+            logger.info("[Telegram] Command listener not started (bot disabled)")
+            return
+
+        self._ensure_bot()
+        if not self._bot:
+            return
+
+        logger.info("🤖 [Telegram] Starting command listener (read-only: /status /pnl /positions /checkpoint_now)")
+        asyncio.create_task(self._command_poll_loop())
+
+    async def _command_poll_loop(self) -> None:
+        """Long-poll Telegram for incoming messages and route commands."""
+        last_update_id: Optional[int] = None
+        while True:
+            try:
+                updates = await self._bot.get_updates(
+                    offset=last_update_id,
+                    timeout=30,
+                    allowed_updates=["message"]
+                )
+                for update in updates:
+                    last_update_id = update.update_id + 1
+                    message = update.message
+                    if not message or not message.text:
+                        continue
+                    text = message.text.strip().lower()
+                    # Only respond to commands from the authorized chat
+                    chat_id = str(message.chat.id)
+                    if chat_id != self._chat_id:
+                        continue
+
+                    if text.startswith("/status"):
+                        asyncio.create_task(self._cmd_status(message.chat.id))
+                    elif text.startswith("/pnl"):
+                        asyncio.create_task(self._cmd_pnl(message.chat.id))
+                    elif text.startswith("/positions"):
+                        asyncio.create_task(self._cmd_positions(message.chat.id))
+                    elif text.startswith("/checkpoint_now"):
+                        asyncio.create_task(self._cmd_checkpoint(message.chat.id))
+
+            except Exception as e:
+                logger.debug(f"[Telegram] Command poll error: {e}")
+                await asyncio.sleep(5)
+            else:
+                await asyncio.sleep(1)
+
+    async def _cmd_status(self, chat_id: int) -> None:
+        try:
+            from src.paper_trading.position_tracker import position_tracker, FROZEN_PARAMS
+            open_count = await position_tracker.get_open_count()
+            text = (
+                f"🤖 <b>Bot Status</b>\n"
+                f"Posisi aktif: <b>{open_count}/{FROZEN_PARAMS['max_active_positions']}</b>\n"
+                f"Threshold (frozen): <b>{FROZEN_PARAMS['opportunity_threshold']:.0f}</b>\n"
+                f"SL: <b>{FROZEN_PARAMS['stop_loss_pct']:.0f}%</b> | "
+                f"TP1: <b>+{FROZEN_PARAMS['tp1_pct']:.0f}%</b> | "
+                f"TP2: <b>+{FROZEN_PARAMS['tp2_pct']:.0f}%</b> | "
+                f"TP3: <b>+{FROZEN_PARAMS['tp3_pct']:.0f}%</b>\n"
+                f"Parameter version: <b>{FROZEN_PARAMS['parameter_version']}</b>"
+            )
+            await self._bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+        except Exception as e:
+            logger.debug(f"[Telegram] /status error: {e}")
+
+    async def _cmd_pnl(self, chat_id: int) -> None:
+        try:
+            from src.paper_trading.checkpoint_reporter import generate_checkpoint_report
+            report = await generate_checkpoint_report(trigger="/pnl command")
+            # Telegram message limit is 4096 chars
+            if len(report) > 4000:
+                report = report[:3990] + "\n...\n<i>(truncated)</i>"
+            await self._bot.send_message(chat_id=chat_id, text=report, parse_mode="HTML")
+        except Exception as e:
+            logger.debug(f"[Telegram] /pnl error: {e}")
+
+    async def _cmd_positions(self, chat_id: int) -> None:
+        try:
+            from src.paper_trading.position_tracker import position_tracker
+            from src.database.client import db_manager
+
+            rows = await db_manager.query(
+                "paper_trade_positions",
+                filters={"exit_reason": "eq.OPEN"},
+                limit=20
+            )
+            if not rows:
+                await self._bot.send_message(
+                    chat_id=chat_id, text="📊 Tidak ada posisi aktif saat ini.", parse_mode="HTML"
+                )
+                return
+
+            lines = [f"📊 <b>Posisi Aktif ({len(rows)})</b>"]
+            for r in rows:
+                import html as _html
+                sym = _html.escape(r.get("symbol", "?"))
+                entry = r.get("entry_price_usd", 0.0) or 0.0
+                high = r.get("price_high_ever_seen", 0.0) or 0.0
+                mfe_est = ((high - entry) / entry * 100.0) if entry > 0 else 0.0
+                src = r.get("signal_source", "?")
+                lines.append(f"• ${sym} | {src} | Entry ${entry:.6f} | MFE est: {mfe_est:+.0f}%")
+
+            await self._bot.send_message(
+                chat_id=chat_id, text="\n".join(lines), parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.debug(f"[Telegram] /positions error: {e}")
+
+    async def _cmd_checkpoint(self, chat_id: int) -> None:
+        try:
+            from src.paper_trading.checkpoint_reporter import generate_checkpoint_report
+            await self._bot.send_message(
+                chat_id=chat_id, text="⏳ Generating checkpoint report...", parse_mode="HTML"
+            )
+            report = await generate_checkpoint_report(trigger="/checkpoint_now")
+            if len(report) > 4000:
+                report = report[:3990] + "\n...\n<i>(truncated)</i>"
+            await self._bot.send_message(chat_id=chat_id, text=report, parse_mode="HTML")
+        except Exception as e:
+            logger.debug(f"[Telegram] /checkpoint_now error: {e}")
 
 
 telegram_notifier = TelegramNotifier()

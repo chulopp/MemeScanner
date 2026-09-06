@@ -1,7 +1,12 @@
 """
-Signal Recorder — Fase 5
+Signal Recorder — Fase 5 (Paper Trading Live)
 Records every token that passes the full pipeline (filter + scoring) as a live paper trading signal.
 Also records baseline tokens (passed filter but below score threshold) for statistical comparison.
+
+Paper Trading Live additions (per implementation plan):
+  - Forwards event.source as signal_source (PINTU_A | PINTU_B) to paper_signals
+  - Calls position_tracker.open_position() for above-threshold signals
+  - Capacity/duplicate handling is delegated to PositionTracker
 """
 
 import asyncio
@@ -37,6 +42,10 @@ async def record_signal(
 
     now_utc = datetime.now(tz=timezone.utc).isoformat()
 
+    # Map event.source to signal_source for Pintu A vs Pintu B tracking
+    source_raw = getattr(event, "source", "NEW_PAIR") or "NEW_PAIR"
+    signal_source = "PINTU_B" if source_raw == "WALLET_TRACKER" else "PINTU_A"
+
     record = {
         "token_address": event.token_address,
         "symbol": (event.symbol or "UNKNOWN")[:20],
@@ -50,6 +59,7 @@ async def record_signal(
         "signal_threshold_used": settings.opportunity_threshold,
         "passed_filter_tags": _extract_filter_tags(safety_result),
         "is_baseline": is_baseline,
+        "signal_source": signal_source,
         "telegram_message_id": None,
         "resolved_5m": False,
         "resolved_15m": False,
@@ -65,7 +75,8 @@ async def record_signal(
         signal_type = "BASELINE" if is_baseline else "SIGNAL"
         logger.info(
             f"📝 [{signal_type}] Recorded: {event.symbol} ({event.token_address[:8]}...) | "
-            f"Score: {score:.1f} | Entry: ${entry_price:.8f} | Liq: ${entry_liq:,.0f}"
+            f"Score: {score:.1f} | Entry: ${entry_price:.8f} | Liq: ${entry_liq:,.0f} | "
+            f"Source: {signal_source}"
         )
 
         # Send Telegram notification for above-threshold signals (Stage 1 Fast-Path)
@@ -99,6 +110,10 @@ async def record_signal(
                     msg_id=msg_id,
                     signal_id=signal_id
                 ))
+
+            # Paper Trading Live: open virtual position
+            if signal_id:
+                asyncio.create_task(_open_virtual_position(event, score, signal_id))
 
         return signal_id
 
@@ -171,6 +186,25 @@ async def _run_stage2_synthesis(
         except Exception:
             pass
 
+
+async def _open_virtual_position(
+    event: RawTokenEvent,
+    opportunity_score: float,
+    signal_id: str,
+) -> None:
+    """
+    Background task: open a virtual position in PositionTracker.
+    Skipped signals (capacity/duplicate) are recorded to paper_trade_positions by PositionTracker.
+    """
+    try:
+        from src.paper_trading.position_tracker import position_tracker
+        await position_tracker.open_position(
+            event=event,
+            opportunity_score=opportunity_score,
+            paper_signal_id=signal_id,
+        )
+    except Exception as e:
+        logger.warning(f"[SignalRecorder] open_virtual_position failed for {event.token_address[:8]}: {e}")
 
 
 def _extract_filter_tags(result: SafetyCheckResult) -> list[str]:

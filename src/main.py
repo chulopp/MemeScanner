@@ -30,6 +30,7 @@ from src.utils.logger import logger, console, print_token_table, mask_url
 from src.utils.solana_rpc import solana_rpc
 from src.paper_trading.outcome_worker import outcome_worker
 from src.paper_trading.delayed_evaluator import delayed_evaluator
+from src.paper_trading.position_tracker import position_tracker
 from src.paper_trading import price_fetcher as pt_price_fetcher
 from src.ingestion.wallet_tracker_ws import WalletTrackerListener
 
@@ -126,6 +127,20 @@ class MemeScannerApp:
         except Exception as de_err:
             logger.warning(f"Delayed evaluator start skipped: {de_err}")
 
+        # Start Paper Trading Live position tracker (30s polling, TP/SL/trailing)
+        try:
+            await position_tracker.start()
+            logger.info("📊 [PositionTracker] Paper Trading Live position tracker started.")
+        except Exception as pt_err:
+            logger.warning(f"Position tracker start skipped: {pt_err}")
+
+        # Start Telegram command listener (read-only: /status /pnl /positions /checkpoint_now)
+        try:
+            from src.paper_trading.telegram_notifier import telegram_notifier
+            await telegram_notifier.setup_command_listener()
+        except Exception as tg_err:
+            logger.warning(f"Telegram command listener start skipped: {tg_err}")
+
         # Start ingestion listeners (Pintu A: PumpPortal + Raydium)
         await self.ingestion_manager.start()
 
@@ -162,9 +177,11 @@ class MemeScannerApp:
         try:
             await outcome_worker.stop()
             await delayed_evaluator.stop()
+            await position_tracker.stop()
             await pt_price_fetcher.close()
         except Exception:
             pass
+
 
         # Print summary table if any tokens were processed
         if self.processed_tokens:

@@ -146,9 +146,9 @@ async def run_replay_on_tokens(
             try:
                 if settings_patches:
                     with patch.multiple("src.opportunity.scorer.settings", **settings_patches):
-                        score_result: OpportunityScoreResult = await scorer.score_token(event)
+                        score_result: OpportunityScoreResult = await scorer.score_token(event, use_cache=True)
                 else:
-                    score_result = await scorer.score_token(event)
+                    score_result = await scorer.score_token(event, use_cache=True)
                 opp_score = score_result.opportunity_score
             except Exception as e:
                 logger.debug(f"Scorer error for {event.token_address[:8]}: {e}")

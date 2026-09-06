@@ -59,3 +59,4 @@ coverage.xml
 *.log
 scratch/
 temp/
+backtest_results/*.json

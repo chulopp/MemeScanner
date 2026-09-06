@@ -93,8 +93,17 @@ async def run_bayesian_optimization(
     eval_count = 0
     loop = asyncio.get_running_loop()
 
-    # Primary training dataset: latest train fold (or aggregated training portions)
-    primary_train_set = folds_data[-1][0] if folds_data else sorted_tokens
+    # Strictly chronological In-Sample (Train) vs Out-Of-Sample (Holdout Test)
+    # Split chronologically: First (1 - 1/n_splits) for training, last (1/n_splits) for true OOS test.
+    # This guarantees ZERO future data leakage into the optimization process.
+    split_idx = int(len(sorted_tokens) * ((n_splits - 1) / float(n_splits)))
+    primary_train_set = sorted_tokens[:split_idx]
+    holdout_test_set = sorted_tokens[split_idx:]
+
+    logger.info(
+        f"🔧 Optimizer Dataset Split (Strictly Chronological): "
+        f"{len(primary_train_set)} In-Sample Train tokens | {len(holdout_test_set)} Out-of-Sample Holdout tokens"
+    )
 
     def _run_optimizer_thread():
         nonlocal best_params, best_train_objective, eval_count
@@ -188,8 +197,36 @@ async def run_bayesian_optimization(
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         gp_result = await loop.run_in_executor(pool, _run_optimizer_thread)
 
-    # 4. Rigorous Out-of-Sample Evaluation on all Walk-Forward Test Folds
-    logger.info("🛡️ Evaluating Best Parameters on Out-of-Sample Test Folds...")
+    best_exit_cfg = ExitStrategyConfig(
+        sl_pct=best_params["exit_sl_pct"],
+        tp_tiers=[
+            TpTier(sell_fraction=0.30, target_return_pct=best_params["exit_tp1_pct"]),
+            TpTier(sell_fraction=0.30, target_return_pct=best_params["exit_tp2_pct"]),
+            TpTier(sell_fraction=0.20, target_return_pct=best_params["exit_tp3_pct"]),
+        ],
+        trailing_tiers=[
+            TrailingTier(multiplier_threshold=10.0, trail_pct_from_ath=best_params["exit_trailing_tier3_pct"]),
+            TrailingTier(multiplier_threshold=5.0,  trail_pct_from_ath=best_params["exit_trailing_tier2_pct"]),
+            TrailingTier(multiplier_threshold=2.0,  trail_pct_from_ath=best_params["exit_trailing_tier1_pct"]),
+        ],
+    )
+
+    # 4. Pure Out-of-Sample Holdout Evaluation (Zero Leakage)
+    logger.info("🛡️ Evaluating Best Parameters on Untouched Out-of-Sample Holdout Dataset...")
+    holdout_metrics = await run_replay_on_tokens(
+        tokens=holdout_test_set,
+        opportunity_threshold=best_params["opportunity_threshold"],
+        weight_overrides=best_params,
+        exit_config=best_exit_cfg
+    )
+    logger.info(
+        f"🎯 Pure Out-Of-Sample Holdout: EV(raw)={holdout_metrics.ev_per_trade:+.2f}% | "
+        f"EV(exit)={holdout_metrics.ev_per_trade_with_exit:+.2f}% | "
+        f"Precision={holdout_metrics.filter_precision:.1%} | "
+        f"Recall={holdout_metrics.opportunity_recall:.1%}"
+    )
+
+    # Walk-forward fold evaluation for tracking stability across splits
     cv_result: WalkForwardCVResult = await evaluate_walk_forward_cv(
         tokens=sorted_tokens,
         opportunity_threshold=best_params["opportunity_threshold"],
@@ -226,7 +263,11 @@ async def run_bayesian_optimization(
         "oos_opportunity_recall": cv_result.avg_test_recall,
         "fold_results": fold_details,
         "is_optimal": True,
-        "notes": f"5-Fold Walk-Forward Cross Validation. {notes}"
+        "notes": (
+            f"5-Fold Walk-Forward Cross Validation. "
+            f"Active OOS folds: {cv_result.n_active_folds}/{cv_result.n_splits}. "
+            f"{notes}"
+        )
     }
 
     try:
@@ -235,7 +276,7 @@ async def run_bayesian_optimization(
         logger.debug(f"Failed to persist backtest run: {e}")
 
     logger.info(
-        f"🎯 Walk-Forward CV Results (Out-of-Sample):\n"
+        f"🎯 Walk-Forward CV Results (Out-of-Sample, {cv_result.n_active_folds}/{cv_result.n_splits} active folds):\n"
         f"  Average OOS EV/Trade:    {cv_result.avg_test_ev:+.2f}%\n"
         f"  Average OOS Precision:   {cv_result.avg_test_precision:.1%}\n"
         f"  Average OOS Recall:      {cv_result.avg_test_recall:.1%}\n"

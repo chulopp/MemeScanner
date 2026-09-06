@@ -33,13 +33,14 @@ class FoldEvaluationResult:
 @dataclass
 class WalkForwardCVResult:
     n_splits: int
+    n_active_folds: int             # Number of OOS folds with at least one trade above threshold
     total_tokens: int
     folds: list[FoldEvaluationResult]
     avg_train_ev: float
     avg_train_precision: float
-    avg_test_ev: float              # Out-of-Sample average EV
-    avg_test_precision: float       # Out-of-Sample average Precision
-    avg_test_recall: float          # Out-of-Sample average Recall
+    avg_test_ev: float              # Out-of-Sample average EV (active folds only)
+    avg_test_precision: float       # Out-of-Sample average Precision (active folds only)
+    avg_test_recall: float          # Out-of-Sample average Recall (active folds only)
     is_ev_positive_oos: bool
 
 
@@ -96,7 +97,7 @@ async def evaluate_walk_forward_cv(
         logger.warning("No valid folds could be generated from tokens list.")
         dummy_metrics = BacktestMetrics(0, 0, 0, 0, 0, 0, 0.0, 0.0, opportunity_threshold, 0, 0, 0.0, 0.0, False)
         return WalkForwardCVResult(
-            n_splits=n_splits, total_tokens=len(tokens), folds=[],
+            n_splits=n_splits, n_active_folds=0, total_tokens=len(tokens), folds=[],
             avg_train_ev=0.0, avg_train_precision=0.0, avg_test_ev=0.0,
             avg_test_precision=0.0, avg_test_recall=0.0, is_ev_positive_oos=False
         )
@@ -138,12 +139,50 @@ async def evaluate_walk_forward_cv(
 
     avg_train_ev = sum(f.train_metrics.ev_per_trade for f in fold_results) / len(fold_results)
     avg_train_prec = sum(f.train_metrics.filter_precision for f in fold_results) / len(fold_results)
-    avg_test_ev = sum(f.test_metrics.ev_per_trade for f in fold_results) / len(fold_results)
-    avg_test_prec = sum(f.test_metrics.filter_precision for f in fold_results) / len(fold_results)
-    avg_test_rec = sum(f.test_metrics.opportunity_recall for f in fold_results) / len(fold_results)
+
+    # Bug #1 Fix (R15): Exclude empty folds from OOS averages.
+    # A fold is "empty" if no token passed the threshold (tokens_above_threshold == 0).
+    # Including them as 0.0 artificially dilutes the average and misrepresents real performance.
+    active_folds = [f for f in fold_results if f.test_metrics.tokens_above_threshold > 0]
+    skipped_folds = [f for f in fold_results if f.test_metrics.tokens_above_threshold == 0]
+
+    if skipped_folds:
+        skipped_indices = [f.fold_index for f in skipped_folds]
+        logger.warning(
+            f"⚠️  Excluding {len(skipped_folds)} empty OOS fold(s) from averages "
+            f"(no trades above threshold): Fold {skipped_indices}. "
+            f"Only {len(active_folds)}/{len(fold_results)} fold(s) used for OOS metrics."
+        )
+
+    # Bug #3 Diagnostic: log exit data and T+2 coverage per fold
+    for f in fold_results:
+        tm = f.test_metrics
+        above = tm.tokens_above_threshold
+        status = "ACTIVE" if above > 0 else "EMPTY"
+        logger.info(
+            f"  [{status}] Fold {f.fold_index}: above_threshold={above} | "
+            f"exit_coverage={tm.exit_coverage_pct:.1%} | "
+            f"t2_coverage={tm.t2_coverage_pct:.1%} | "
+            f"ev_raw={tm.ev_per_trade:+.2f}% | "
+            f"ev_exit={tm.ev_per_trade_with_exit:+.2f}% | "
+            f"precision={tm.filter_precision:.1%} | "
+            f"recall={tm.opportunity_recall:.1%}"
+        )
+
+    if active_folds:
+        avg_test_ev = sum(f.test_metrics.ev_per_trade for f in active_folds) / len(active_folds)
+        avg_test_prec = sum(f.test_metrics.filter_precision for f in active_folds) / len(active_folds)
+        avg_test_rec = sum(f.test_metrics.opportunity_recall for f in active_folds) / len(active_folds)
+    else:
+        # All folds empty — strategy produces no signals at all
+        logger.error("❌ No active OOS folds found. Threshold may be too high or data insufficient.")
+        avg_test_ev = 0.0
+        avg_test_prec = 0.0
+        avg_test_rec = 0.0
 
     return WalkForwardCVResult(
         n_splits=len(fold_results),
+        n_active_folds=len(active_folds),
         total_tokens=len(tokens),
         folds=fold_results,
         avg_train_ev=round(avg_train_ev, 4),

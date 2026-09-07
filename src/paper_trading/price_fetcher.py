@@ -19,7 +19,7 @@ from src.utils.logger import logger
 
 DEXSCREENER_TOKEN_URL = "https://api.dexscreener.com/latest/dex/tokens/{mint}"
 
-ALLOWED_DEX_IDS = {"pumpfun", "raydium", "meteora", "orca", "whirlpool"}
+ALLOWED_DEX_IDS = {"pumpfun", "pumpswap", "raydium", "meteora", "orca", "whirlpool"}
 ALLOWED_QUOTE_SYMBOLS = {"SOL", "WSOL", "USDC", "USDT"}
 
 
@@ -56,7 +56,6 @@ async def _fetch_dexscreener(client: httpx.AsyncClient, mint: str) -> Optional[P
         if not pairs or not isinstance(pairs, list):
             return None
 
-        # Filter out bogus / spoofed DEX pools (like 'pumpswap' or unverified pairs)
         valid_pairs = []
         for p in pairs:
             dex_id = (p.get("dexId") or "").lower()
@@ -74,27 +73,36 @@ async def _fetch_dexscreener(client: httpx.AsyncClient, mint: str) -> Optional[P
         selected_pair = None
 
         if is_pump:
-            # Raydium / Meteora pool with meaningful liquidity indicates graduation
-            raydium_pairs = [
+            # Raydium / Meteora / PumpSwap pool with meaningful liquidity indicates graduation
+            graduated_pairs = [
                 p for p in valid_pairs
-                if p.get("dexId") in ("raydium", "meteora")
-                and float((p.get("liquidity") or {}).get("usd", 0) or 0) > 5000
+                if p.get("dexId") in ("raydium", "meteora", "pumpswap")
+                and float((p.get("liquidity") or {}).get("usd", 0) or 0) > 1000
             ]
-            pumpfun_pairs = [p for p in valid_pairs if p.get("dexId") == "pumpfun"]
-
-            if raydium_pairs:
+            if graduated_pairs:
                 selected_pair = sorted(
-                    raydium_pairs,
+                    graduated_pairs,
                     key=lambda p: float((p.get("liquidity") or {}).get("usd", 0) or 0),
                     reverse=True
                 )[0]
-            elif pumpfun_pairs:
-                selected_pair = pumpfun_pairs[0]
+            else:
+                # If ungraduated or no high liquidity graduated pair, sort by liquidity descending, then volume
+                selected_pair = sorted(
+                    valid_pairs,
+                    key=lambda p: (
+                        float((p.get("liquidity") or {}).get("usd", 0) or 0),
+                        float((p.get("volume") or {}).get("h24", 0) or 0)
+                    ),
+                    reverse=True
+                )[0]
 
         if not selected_pair:
             selected_pair = sorted(
                 valid_pairs,
-                key=lambda p: float((p.get("liquidity") or {}).get("usd", 0) or 0),
+                key=lambda p: (
+                    float((p.get("liquidity") or {}).get("usd", 0) or 0),
+                    float((p.get("volume") or {}).get("h24", 0) or 0)
+                ),
                 reverse=True
             )[0]
 
@@ -211,6 +219,16 @@ async def fetch_price(mint: str, bonding_curve_address: Optional[str] = None) ->
     client = await _get_client()
 
     # Tier 1: On-chain Pump.fun Bonding Curve state (instant for ungraduated tokens)
+    if not bonding_curve_address and mint.endswith("pump"):
+        try:
+            from solders.pubkey import Pubkey
+            PUMP_PROGRAM = Pubkey.from_string("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
+            m_pub = Pubkey.from_string(mint)
+            bc_pda, _ = Pubkey.find_program_address([b"bonding-curve", bytes(m_pub)], PUMP_PROGRAM)
+            bonding_curve_address = str(bc_pda)
+        except Exception:
+            pass
+
     if bonding_curve_address:
         try:
             from src.utils.solana_rpc import solana_rpc

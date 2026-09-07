@@ -97,6 +97,7 @@ class PositionTracker:
         self._active: dict[str, ActivePosition] = {}   # position_id → ActivePosition
         self._running = False
         self._poll_task: Optional[asyncio.Task] = None
+        self._open_lock = asyncio.Lock()
 
     # ──────────────────────────────────────────
     # Public API
@@ -104,7 +105,14 @@ class PositionTracker:
 
     async def get_open_count(self) -> int:
         """Returns number of currently open (non-skipped, non-closed) positions."""
-        return len(self._active)
+        if not db_manager._connected:
+            return len(self._active)
+        try:
+            db_open = await db_manager.query("paper_trade_positions", filters={"exit_reason": "eq.OPEN"}, limit=50)
+            db_count = len([t for t in db_open if not t.get("skipped_reason")])
+            return max(len(self._active), db_count)
+        except Exception:
+            return len(self._active)
 
     async def is_duplicate(self, token_address: str) -> bool:
         """Returns True if token already has an open position."""
@@ -125,118 +133,118 @@ class PositionTracker:
         Skipped positions are still recorded to DB with a skipped_reason
         so checkpoints can quantify missed signals.
         """
-        token_address = event.token_address
-        symbol = event.symbol or "UNKNOWN"
-        source_raw = getattr(event, "source", "NEW_PAIR") or "NEW_PAIR"
-        signal_source = "PINTU_B" if source_raw == "WALLET_TRACKER" else "PINTU_A"
+        async with self._open_lock:
+            token_address = event.token_address
+            symbol = event.symbol or "UNKNOWN"
+            source_raw = getattr(event, "source", "NEW_PAIR") or "NEW_PAIR"
+            signal_source = "PINTU_B" if source_raw == "WALLET_TRACKER" else "PINTU_A"
 
-        now_utc = datetime.now(tz=timezone.utc)
-        position_id = str(uuid.uuid4())
+            now_utc = datetime.now(tz=timezone.utc)
+            position_id = str(uuid.uuid4())
 
-        # ── Capacity Check ──
-        open_count = await self.get_open_count()
-        if open_count >= FROZEN_PARAMS["max_active_positions"]:
+            # ── Capacity Check ──
+            open_count = await self.get_open_count()
+            if open_count >= FROZEN_PARAMS["max_active_positions"]:
+                logger.info(
+                    f"⛔ [PositionTracker] Skipping {symbol} — capacity full "
+                    f"({open_count}/{FROZEN_PARAMS['max_active_positions']} positions open)"
+                )
+                await self._record_skipped(
+                    position_id=position_id,
+                    token_address=token_address,
+                    symbol=symbol,
+                    signal_source=signal_source,
+                    opportunity_score=opportunity_score,
+                    paper_signal_id=paper_signal_id,
+                    skipped_reason="SKIPPED_CAPACITY",
+                    now_utc=now_utc,
+                )
+                return None
+
+            # ── Duplicate Check ──
+            if await self.is_duplicate(token_address):
+                logger.info(f"⛔ [PositionTracker] Skipping {symbol} — duplicate (already holding)")
+                await self._record_skipped(
+                    position_id=position_id,
+                    token_address=token_address,
+                    symbol=symbol,
+                    signal_source=signal_source,
+                    opportunity_score=opportunity_score,
+                    paper_signal_id=paper_signal_id,
+                    skipped_reason="DUPLICATE",
+                    now_utc=now_utc,
+                )
+                return None
+
+            # ── Fetch Entry Price ──
+            resolved_price = 0.0
+            resolved_mcap = 0.0
+            bc_addr = getattr(event, "bonding_curve_address", None)
+            price_snap = await fetch_price(token_address, bc_addr)
+            if price_snap and price_snap.price_usd > 0:
+                resolved_price = price_snap.price_usd
+                resolved_mcap = price_snap.market_cap_usd
+            elif entry_price and entry_price > 0:
+                resolved_price = entry_price
+                resolved_mcap = entry_market_cap_usd or (
+                    entry_price * 1_000_000_000 if token_address.endswith("pump") else 0.0
+                )
+
+            if resolved_price <= 0:
+                logger.warning(f"⚠️ [PositionTracker] Cannot open {symbol} — no price available")
+                return None
+
+            entry_price = resolved_price
+            entry_mcap = entry_market_cap_usd or resolved_mcap
+            position_size = FROZEN_PARAMS["position_size_usd"]
+
+            # ── Insert to DB ──
+            record = {
+                "id": position_id,
+                "token_address": token_address,
+                "symbol": symbol[:20],
+                "signal_source": signal_source,
+                "paper_signal_id": paper_signal_id,
+                "opportunity_score_at_entry": round(opportunity_score, 2),
+                "entry_price_usd": entry_price,
+                "entry_time": now_utc.isoformat(),
+                "position_size_usd": position_size,
+                "price_high_ever_seen": entry_price,
+                "exit_reason": "OPEN",
+                "parameter_version": FROZEN_PARAMS["parameter_version"],
+                "skipped_reason": None,
+            }
+
+            try:
+                await db_manager.insert("paper_trade_positions", record)
+            except Exception as e:
+                logger.error(f"❌ [PositionTracker] DB insert failed for {symbol}: {e}")
+                return None
+
+            # ── Register in memory ──
+            pos = ActivePosition(
+                position_id=position_id,
+                token_address=token_address,
+                symbol=symbol,
+                signal_source=signal_source,
+                entry_price_usd=entry_price,
+                entry_time=now_utc,
+                position_size_usd=position_size,
+                price_high_ever_seen=entry_price,
+                bonding_curve_address=bc_addr,
+                opportunity_score=opportunity_score,
+                entry_market_cap_usd=entry_mcap,
+            )
+            self._active[position_id] = pos
+
             logger.info(
-                f"⛔ [PositionTracker] Skipping {symbol} — capacity full "
-                f"({open_count}/{FROZEN_PARAMS['max_active_positions']} positions open)"
-            )
-            await self._record_skipped(
-                position_id=position_id,
-                token_address=token_address,
-                symbol=symbol,
-                signal_source=signal_source,
-                opportunity_score=opportunity_score,
-                paper_signal_id=paper_signal_id,
-                skipped_reason="SKIPPED_CAPACITY",
-                now_utc=now_utc,
-            )
-            return None
-
-        # ── Duplicate Check ──
-        if await self.is_duplicate(token_address):
-            logger.info(f"⛔ [PositionTracker] Skipping {symbol} — duplicate (already holding)")
-            await self._record_skipped(
-                position_id=position_id,
-                token_address=token_address,
-                symbol=symbol,
-                signal_source=signal_source,
-                opportunity_score=opportunity_score,
-                paper_signal_id=paper_signal_id,
-                skipped_reason="DUPLICATE",
-                now_utc=now_utc,
-            )
-            return None
-
-        # ── Fetch Entry Price ──
-        resolved_price = 0.0
-        resolved_mcap = 0.0
-        bc_addr = getattr(event, "bonding_curve_address", None)
-        price_snap = await fetch_price(token_address, bc_addr)
-        if price_snap and price_snap.price_usd > 0:
-            resolved_price = price_snap.price_usd
-            resolved_mcap = price_snap.market_cap_usd
-        elif entry_price and entry_price > 0:
-            resolved_price = entry_price
-            resolved_mcap = entry_market_cap_usd or (
-                entry_price * 1_000_000_000 if token_address.endswith("pump") else 0.0
+                f"📂 [PositionTracker] Opened: ${symbol} ({token_address[:8]}...) | "
+                f"Entry: ${entry_price:.8f} | Source: {signal_source} | Score: {opportunity_score:.1f}"
             )
 
-        if resolved_price <= 0:
-            logger.warning(f"⚠️ [PositionTracker] Cannot open {symbol} — no price available")
-            return None
-
-        entry_price = resolved_price
-        entry_mcap = entry_market_cap_usd or resolved_mcap
-        position_size = FROZEN_PARAMS["position_size_usd"]
-
-        # ── Insert to DB ──
-        record = {
-            "id": position_id,
-            "token_address": token_address,
-            "symbol": symbol[:20],
-            "signal_source": signal_source,
-            "paper_signal_id": paper_signal_id,
-            "opportunity_score_at_entry": round(opportunity_score, 2),
-            "entry_price_usd": entry_price,
-            "entry_time": now_utc.isoformat(),
-            "position_size_usd": position_size,
-            "price_high_ever_seen": entry_price,
-            "exit_reason": "OPEN",
-            "parameter_version": FROZEN_PARAMS["parameter_version"],
-            "skipped_reason": None,
-        }
-
-        try:
-            await db_manager.insert("paper_trade_positions", record)
-        except Exception as e:
-            logger.error(f"❌ [PositionTracker] DB insert failed for {symbol}: {e}")
-            return None
-
-        # ── Register in memory ──
-        pos = ActivePosition(
-            position_id=position_id,
-            token_address=token_address,
-            symbol=symbol,
-            signal_source=signal_source,
-            entry_price_usd=entry_price,
-            entry_time=now_utc,
-            position_size_usd=position_size,
-            price_high_ever_seen=entry_price,
-            bonding_curve_address=bc_addr,
-            opportunity_score=opportunity_score,
-            entry_market_cap_usd=entry_mcap,
-        )
-        self._active[position_id] = pos
-
-
-        logger.info(
-            f"📂 [PositionTracker] Opened: ${symbol} ({token_address[:8]}...) | "
-            f"Entry: ${entry_price:.8f} | Source: {signal_source} | Score: {opportunity_score:.1f}"
-        )
-
-        # Send Telegram notification (non-blocking)
-        asyncio.create_task(self._notify_position_opened(pos))
-        return position_id
+            # Send Telegram notification (non-blocking)
+            asyncio.create_task(self._notify_position_opened(pos))
+            return position_id
 
     async def get_portfolio_summary(self) -> dict:
         """
@@ -574,6 +582,14 @@ class PositionTracker:
                 pos_id = row.get("id")
                 if not pos_id or pos_id in self._active:
                     continue
+
+                if len(self._active) >= FROZEN_PARAMS["max_active_positions"]:
+                    logger.warning(
+                        f"⚠️ [PositionTracker] Reached capacity limit "
+                        f"({len(self._active)}/{FROZEN_PARAMS['max_active_positions']}). "
+                        f"Skipping recovery for excess position {row.get('symbol')}."
+                    )
+                    break
 
                 entry_time_str = row.get("entry_time", "")
                 if isinstance(entry_time_str, str):

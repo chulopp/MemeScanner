@@ -79,6 +79,8 @@ class ActivePosition:
     # MFE (Maximum Favorable Excursion) tracking
     price_high_ever_seen: float = 0.0
     bonding_curve_address: Optional[str] = None
+    opportunity_score: float = 0.0
+    entry_market_cap_usd: float = 0.0
 
 
 class PositionTracker:
@@ -114,6 +116,7 @@ class PositionTracker:
         opportunity_score: float,
         paper_signal_id: Optional[str] = None,
         entry_price: Optional[float] = None,
+        entry_market_cap_usd: Optional[float] = None,
     ) -> Optional[str]:
         """
         Opens a new virtual position if capacity allows.
@@ -166,18 +169,24 @@ class PositionTracker:
 
         # ── Fetch Entry Price ──
         resolved_price = 0.0
+        resolved_mcap = 0.0
         bc_addr = getattr(event, "bonding_curve_address", None)
         price_snap = await fetch_price(token_address, bc_addr)
         if price_snap and price_snap.price_usd > 0:
             resolved_price = price_snap.price_usd
+            resolved_mcap = price_snap.market_cap_usd
         elif entry_price and entry_price > 0:
             resolved_price = entry_price
+            resolved_mcap = entry_market_cap_usd or (
+                entry_price * 1_000_000_000 if token_address.endswith("pump") else 0.0
+            )
 
         if resolved_price <= 0:
             logger.warning(f"⚠️ [PositionTracker] Cannot open {symbol} — no price available")
             return None
 
         entry_price = resolved_price
+        entry_mcap = entry_market_cap_usd or resolved_mcap
         position_size = FROZEN_PARAMS["position_size_usd"]
 
         # ── Insert to DB ──
@@ -214,8 +223,11 @@ class PositionTracker:
             position_size_usd=position_size,
             price_high_ever_seen=entry_price,
             bonding_curve_address=bc_addr,
+            opportunity_score=opportunity_score,
+            entry_market_cap_usd=entry_mcap,
         )
         self._active[position_id] = pos
+
 
         logger.info(
             f"📂 [PositionTracker] Opened: ${symbol} ({token_address[:8]}...) | "
@@ -225,6 +237,89 @@ class PositionTracker:
         # Send Telegram notification (non-blocking)
         asyncio.create_task(self._notify_position_opened(pos))
         return position_id
+
+    async def get_portfolio_summary(self) -> dict:
+        """
+        Computes real-time portfolio accounting:
+        - Starting Capital ($100.0)
+        - Realized PnL ($) from all closed trades (excluding CORRUPTED_RESET)
+        - Allocated Capital ($) across currently open positions
+        - Available Cash ($)
+        - Floating PnL ($ and %) for each open position and total
+        - Total Equity ($) and Total Portfolio ROI (%)
+        """
+        STARTING_CAPITAL = 100.0
+        POSITION_SIZE = FROZEN_PARAMS["position_size_usd"]
+
+        all_trades = await db_manager.query("paper_trade_positions", limit=5000)
+        closed = [
+            t for t in all_trades
+            if t.get("exit_reason") not in ("OPEN", None, "CORRUPTED_RESET")
+            and not t.get("skipped_reason")
+        ]
+
+        realized_pnl_usd = 0.0
+        for t in closed:
+            size = float(t.get("position_size_usd", POSITION_SIZE) or POSITION_SIZE)
+            ret_pct = float(t.get("realized_return_pct", 0.0) or 0.0)
+            realized_pnl_usd += size * (ret_pct / 100.0)
+
+        active_list = list(self._active.values())
+        allocated_usd = len(active_list) * POSITION_SIZE
+        available_cash = STARTING_CAPITAL + realized_pnl_usd - allocated_usd
+
+        # Compute live floating PnL for active positions
+        open_details = []
+        total_floating_usd = 0.0
+
+        for pos in active_list:
+            snap = await fetch_price(pos.token_address, pos.bonding_curve_address)
+            cur_price = snap.price_usd if snap else pos.entry_price_usd
+            cur_mcap = snap.market_cap_usd if (snap and snap.market_cap_usd > 0) else (
+                cur_price * 1_000_000_000 if pos.token_address.endswith("pump") else 0.0
+            )
+            entry_mcap = pos.entry_market_cap_usd or (
+                pos.entry_price_usd * 1_000_000_000 if pos.token_address.endswith("pump") else 0.0
+            )
+
+            ret_pct = ((cur_price - pos.entry_price_usd) / pos.entry_price_usd * 100.0) if pos.entry_price_usd > 0 else 0.0
+            pnl_usd = pos.position_size_usd * (ret_pct / 100.0)
+            total_floating_usd += pnl_usd
+
+            high = max(pos.price_high_ever_seen, cur_price)
+            mfe_pct = ((high - pos.entry_price_usd) / pos.entry_price_usd * 100.0) if pos.entry_price_usd > 0 else 0.0
+            hold_mins = (datetime.now(tz=timezone.utc) - pos.entry_time).total_seconds() / 60.0
+
+            open_details.append({
+                "symbol": pos.symbol,
+                "token_address": pos.token_address,
+                "signal_source": pos.signal_source,
+                "entry_price": pos.entry_price_usd,
+                "entry_mcap": entry_mcap,
+                "current_price": cur_price,
+                "current_mcap": cur_mcap,
+                "floating_pct": ret_pct,
+                "floating_usd": pnl_usd,
+                "mfe_pct": mfe_pct,
+                "hold_minutes": hold_mins,
+                "position_size": pos.position_size_usd,
+            })
+
+        total_equity = available_cash + allocated_usd + total_floating_usd
+        portfolio_roi_pct = ((total_equity - STARTING_CAPITAL) / STARTING_CAPITAL) * 100.0
+
+        return {
+            "starting_capital": STARTING_CAPITAL,
+            "available_cash": available_cash,
+            "allocated_usd": allocated_usd,
+            "open_count": len(active_list),
+            "realized_pnl_usd": realized_pnl_usd,
+            "total_floating_usd": total_floating_usd,
+            "total_equity": total_equity,
+            "portfolio_roi_pct": portfolio_roi_pct,
+            "open_positions": open_details,
+            "closed_trades_count": len(closed),
+        }
 
     # ──────────────────────────────────────────
     # Background polling loop
@@ -468,12 +563,14 @@ class PositionTracker:
                 else:
                     entry_time = entry_time_str or datetime.now(tz=timezone.utc)
 
+                pos_entry_price = row.get("entry_price_usd", 0.0) or 0.0
+                pos_token_addr = row.get("token_address", "")
                 pos = ActivePosition(
                     position_id=pos_id,
-                    token_address=row.get("token_address", ""),
+                    token_address=pos_token_addr,
                     symbol=row.get("symbol", "UNKNOWN"),
                     signal_source=row.get("signal_source", "PINTU_A"),
-                    entry_price_usd=row.get("entry_price_usd", 0.0) or 0.0,
+                    entry_price_usd=pos_entry_price,
                     entry_time=entry_time,
                     position_size_usd=row.get("position_size_usd", 2.0) or 2.0,
                     price_high_ever_seen=row.get("price_high_ever_seen", 0.0) or 0.0,
@@ -482,6 +579,8 @@ class PositionTracker:
                     tp2_hit=False,
                     tp3_hit=False,
                     remaining_fraction=1.0,
+                    opportunity_score=float(row.get("opportunity_score_at_entry", 0.0) or 0.0),
+                    entry_market_cap_usd=pos_entry_price * 1_000_000_000 if pos_token_addr.endswith("pump") else 0.0,
                 )
                 self._active[pos_id] = pos
                 recovered += 1
@@ -504,8 +603,9 @@ class PositionTracker:
                 token_address=pos.token_address,
                 signal_source=pos.signal_source,
                 entry_price=pos.entry_price_usd,
-                opportunity_score=pos.entry_price_usd,   # score not stored here, best effort
+                opportunity_score=pos.opportunity_score,
                 position_size=pos.position_size_usd,
+                entry_market_cap_usd=pos.entry_market_cap_usd,
             )
         except Exception as e:
             logger.debug(f"[PositionTracker] notify_opened failed: {e}")
@@ -515,6 +615,8 @@ class PositionTracker:
     ) -> None:
         try:
             from src.paper_trading.telegram_notifier import telegram_notifier
+            exit_price = pos.entry_price_usd * (1.0 + return_pct / 100.0)
+            exit_mcap = exit_price * 1_000_000_000 if pos.token_address.endswith("pump") else 0.0
             await telegram_notifier.send_tp_hit(
                 symbol=pos.symbol,
                 token_address=pos.token_address,
@@ -522,6 +624,10 @@ class PositionTracker:
                 return_pct=return_pct,
                 sell_fraction=sell_fraction,
                 remaining_fraction=pos.remaining_fraction,
+                entry_price=pos.entry_price_usd,
+                exit_price=exit_price,
+                entry_mcap=pos.entry_market_cap_usd,
+                exit_mcap=exit_mcap,
             )
         except Exception as e:
             logger.debug(f"[PositionTracker] notify_tp failed: {e}")
@@ -536,12 +642,17 @@ class PositionTracker:
     ) -> None:
         try:
             from src.paper_trading.telegram_notifier import telegram_notifier
+            exit_mcap = exit_price * 1_000_000_000 if pos.token_address.endswith("pump") else 0.0
             if reason == "SL":
                 await telegram_notifier.send_sl_hit(
                     symbol=pos.symbol,
                     token_address=pos.token_address,
                     return_pct=realized_return_pct,
                     hold_minutes=(datetime.now(tz=timezone.utc) - pos.entry_time).total_seconds() / 60.0,
+                    entry_price=pos.entry_price_usd,
+                    exit_price=exit_price,
+                    entry_mcap=pos.entry_market_cap_usd,
+                    exit_mcap=exit_mcap,
                 )
             elif reason == "TRAILING":
                 await telegram_notifier.send_trailing_stop_hit(
@@ -549,6 +660,10 @@ class PositionTracker:
                     token_address=pos.token_address,
                     return_pct=realized_return_pct,
                     mfe_pct=mfe_pct,
+                    entry_price=pos.entry_price_usd,
+                    exit_price=exit_price,
+                    entry_mcap=pos.entry_market_cap_usd,
+                    exit_mcap=exit_mcap,
                 )
         except Exception as e:
             logger.debug(f"[PositionTracker] notify_closed failed: {e}")

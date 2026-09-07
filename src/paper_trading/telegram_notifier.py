@@ -18,6 +18,7 @@ import asyncio
 from typing import Optional
 
 from src.config import settings
+from src.paper_trading.price_fetcher import format_mcap
 from src.utils.logger import logger
 
 # Guard import — python-telegram-bot is optional during testing
@@ -94,7 +95,8 @@ class TelegramNotifier:
         entry_price_usd: float,
         entry_liquidity_usd: float,
         launch_venue: str,
-        is_baseline: bool = False
+        is_baseline: bool = False,
+        market_cap_usd: float = 0.0,
     ) -> Optional[int]:
         """
         Sends a Stage 1 fast-path signal notification to Telegram.
@@ -130,6 +132,7 @@ class TelegramNotifier:
         ])
 
         price_display = f"${entry_price_usd:.8f}" if entry_price_usd < 0.01 else f"${entry_price_usd:.6f}"
+        mcap_display = format_mcap(market_cap_usd) if market_cap_usd > 0 else "N/A"
         liq_display = f"${entry_liquidity_usd:,.0f}" if entry_liquidity_usd else "N/A"
         safe_sym = html.escape(symbol)
         safe_name = html.escape(name)
@@ -143,7 +146,7 @@ class TelegramNotifier:
             f"💯 <b>Score:</b> {opportunity_score:.1f} / 100\n"
             f"🔥 Vol: {vol_score:.0f} | SM: {sm_score:.0f} | Fee: {fee_score:.0f} | Holder: {holder_score:.0f} | Social: {social_score:.0f}\n"
             f"\n"
-            f"💰 Price: <b>{price_display}</b>\n"
+            f"💰 Price: <b>{price_display}</b> | 🧢 MC: <b>{mcap_display}</b>\n"
             f"💧 Liquidity: <b>{liq_display}</b>\n"
         )
 
@@ -301,6 +304,7 @@ class TelegramNotifier:
         entry_price: float,
         opportunity_score: float,
         position_size: float,
+        entry_market_cap_usd: float = 0.0,
     ) -> None:
         """Notif saat virtual position baru dibuka."""
         if not self._enabled:
@@ -312,12 +316,13 @@ class TelegramNotifier:
         import html as _html
         source_emoji = "🔵" if signal_source == "PINTU_B" else "🟢"
         price_display = f"${entry_price:.8f}" if entry_price < 0.01 else f"${entry_price:.6f}"
+        mcap_str = f" (MC: <b>{format_mcap(entry_market_cap_usd)}</b>)" if entry_market_cap_usd > 0 else ""
         text = (
             f"📂 <b>Posisi Dibuka</b>: ${_html.escape(symbol)}\n"
             f"<code>{token_address}</code>\n"
             f"\n"
             f"{source_emoji} Sumber: <b>{signal_source}</b>\n"
-            f"💰 Entry: <b>{price_display}</b>\n"
+            f"💰 Entry: <b>{price_display}</b>{mcap_str}\n"
             f"💵 Ukuran Posisi: <b>${position_size:.2f}</b>\n"
             f"📊 Score: <b>{opportunity_score:.1f}/100</b>"
         )
@@ -337,6 +342,10 @@ class TelegramNotifier:
         return_pct: float,
         sell_fraction: float,
         remaining_fraction: float,
+        entry_price: float = 0.0,
+        exit_price: float = 0.0,
+        entry_mcap: float = 0.0,
+        exit_mcap: float = 0.0,
     ) -> None:
         """Notif saat TP1/TP2/TP3 triggered (partial sell)."""
         if not self._enabled:
@@ -347,10 +356,19 @@ class TelegramNotifier:
 
         import html as _html
         tier_emoji = {"TP1": "✅", "TP2": "📚", "TP3": "💎"}.get(tier, "🎯")
+        mcap_growth = ""
+        if entry_mcap > 0 and exit_mcap > 0:
+            mcap_growth = f"\n🧢 MC Growth: <b>{format_mcap(entry_mcap)} ➔ {format_mcap(exit_mcap)}</b>"
+
+        price_info = ""
+        if exit_price > 0:
+            p_str = f"${exit_price:.8f}" if exit_price < 0.01 else f"${exit_price:.6f}"
+            price_info = f"\n💰 Exit Price: <b>{p_str}</b>"
+
         text = (
-            f"{tier_emoji} <b>{tier} Hit</b>: ${_html.escape(symbol)}\n"
+            f"{tier_emoji} <b>{tier} Hit (+{return_pct:.0f}%)</b>: ${_html.escape(symbol)}\n"
             f"<code>{token_address[:20]}...</code>\n"
-            f"\n"
+            f"{price_info}{mcap_growth}\n"
             f"📈 Return saat ini: <b>{return_pct:+.1f}%</b>\n"
             f"💰 Dijual: <b>{sell_fraction*100:.0f}% posisi</b>\n"
             f"🔒 Sisa di-hold: <b>{remaining_fraction*100:.0f}%</b>"
@@ -369,6 +387,10 @@ class TelegramNotifier:
         token_address: str,
         return_pct: float,
         hold_minutes: float,
+        entry_price: float = 0.0,
+        exit_price: float = 0.0,
+        entry_mcap: float = 0.0,
+        exit_mcap: float = 0.0,
     ) -> None:
         """Notif saat hard stop loss triggered."""
         if not self._enabled:
@@ -378,10 +400,20 @@ class TelegramNotifier:
             return
 
         import html as _html
+        mcap_trajectory = ""
+        if entry_mcap > 0 and exit_mcap > 0:
+            mcap_trajectory = f"\n🧢 MC: <b>{format_mcap(entry_mcap)} ➔ {format_mcap(exit_mcap)}</b>"
+
+        price_trajectory = ""
+        if entry_price > 0 and exit_price > 0:
+            p_entry = f"${entry_price:.8f}" if entry_price < 0.01 else f"${entry_price:.6f}"
+            p_exit = f"${exit_price:.8f}" if exit_price < 0.01 else f"${exit_price:.6f}"
+            price_trajectory = f"\n💰 Entry: <b>{p_entry}</b> ➔ Exit: <b>{p_exit}</b>"
+
         text = (
             f"🛑 <b>Stop Loss</b>: ${_html.escape(symbol)}\n"
             f"<code>{token_address[:20]}...</code>\n"
-            f"\n"
+            f"{price_trajectory}{mcap_trajectory}\n"
             f"📉 Return: <b>{return_pct:+.1f}%</b>\n"
             f"⏱ Di-hold: <b>{hold_minutes:.0f} menit</b>\n"
             f"⚠️ <i>Disclaimer: angka ini dari polling 30s, bisa 10-30% lebih buruk di pasar nyata.</i>"
@@ -400,6 +432,10 @@ class TelegramNotifier:
         token_address: str,
         return_pct: float,
         mfe_pct: float,
+        entry_price: float = 0.0,
+        exit_price: float = 0.0,
+        entry_mcap: float = 0.0,
+        exit_mcap: float = 0.0,
     ) -> None:
         """Notif saat moonbag trailing stop triggered."""
         if not self._enabled:
@@ -410,10 +446,14 @@ class TelegramNotifier:
 
         import html as _html
         captured_ratio = return_pct / mfe_pct * 100.0 if mfe_pct > 0.1 else 0.0
+        mcap_growth = ""
+        if entry_mcap > 0 and exit_mcap > 0:
+            mcap_growth = f"\n🧢 MC Growth: <b>{format_mcap(entry_mcap)} ➔ {format_mcap(exit_mcap)}</b>"
+
         text = (
             f"🌙 <b>Trailing Stop (Moonbag)</b>: ${_html.escape(symbol)}\n"
             f"<code>{token_address[:20]}...</code>\n"
-            f"\n"
+            f"{mcap_growth}\n"
             f"🏔 MFE (puncak tertinggi): <b>{mfe_pct:+.1f}%</b>\n"
             f"📈 Return terealisasi: <b>{return_pct:+.1f}%</b>\n"
             f"🎯 Captured: <b>{captured_ratio:.0f}% dari potensi</b>"
@@ -550,46 +590,129 @@ class TelegramNotifier:
 
     async def _cmd_pnl(self, chat_id: int) -> None:
         try:
-            from src.paper_trading.checkpoint_reporter import generate_checkpoint_report
-            report = await generate_checkpoint_report(trigger="/pnl command")
-            # Telegram message limit is 4096 chars
-            if len(report) > 4000:
-                report = report[:3990] + "\n...\n<i>(truncated)</i>"
-            await self._bot.send_message(chat_id=chat_id, text=report, parse_mode="HTML")
+            from src.paper_trading.position_tracker import position_tracker
+            from src.database.client import db_manager
+            from datetime import datetime, timezone
+            import html as _html
+
+            summary = await position_tracker.get_portfolio_summary()
+            all_trades = await db_manager.query("paper_trade_positions", limit=5000)
+            closed = [
+                t for t in all_trades
+                if t.get("exit_reason") not in ("OPEN", None, "CORRUPTED_RESET")
+                and not t.get("skipped_reason")
+            ]
+
+            now_utc = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+            returns = [float(t.get("realized_return_pct", 0.0) or 0.0) for t in closed]
+            wins = [r for r in returns if r > 0]
+            losses = [r for r in returns if r <= 0]
+            win_rate = (len(wins) / len(returns) * 100.0) if returns else 0.0
+            avg_win = (sum(wins) / len(wins)) if wins else 0.0
+            avg_loss = (sum(losses) / len(losses)) if losses else 0.0
+
+            best_trade = max(closed, key=lambda t: float(t.get("realized_return_pct", 0.0) or 0.0)) if closed else None
+            best_sym = _html.escape(best_trade.get("symbol", "-")) if best_trade else "-"
+            best_ret = float(best_trade.get("realized_return_pct", 0.0) or 0.0) if best_trade else 0.0
+
+            pintu_a_trades = [t for t in closed if t.get("signal_source") == "PINTU_A"]
+            pintu_b_trades = [t for t in closed if t.get("signal_source") == "PINTU_B"]
+            pintu_a_pnl = sum(float(t.get("position_size_usd", 2.0) or 2.0) * (float(t.get("realized_return_pct", 0.0) or 0.0) / 100.0) for t in pintu_a_trades)
+            pintu_b_pnl = sum(float(t.get("position_size_usd", 2.0) or 2.0) * (float(t.get("realized_return_pct", 0.0) or 0.0) / 100.0) for t in pintu_b_trades)
+
+            fl_usd = summary["total_floating_usd"]
+            fl_sign = "+" if fl_usd >= 0 else "-"
+            real_usd = summary["realized_pnl_usd"]
+            real_sign = "+" if real_usd >= 0 else "-"
+            roi_sign = "+" if summary["portfolio_roi_pct"] >= 0 else ""
+
+            text = (
+                f"💰 <b>FINANCIAL PERFORMANCE DASHBOARD</b>\n"
+                f"🕐 <i>{now_utc}</i>\n"
+                f"────────────────────────\n"
+                f"💵 <b>Modal Awal:</b> ${summary['starting_capital']:.2f}\n"
+                f"💎 <b>Total Ekuitas:</b> ${summary['total_equity']:.2f} (<b>{roi_sign}{summary['portfolio_roi_pct']:.1f}%</b>)\n"
+                f"💵 <b>Cash Tersedia:</b> ${summary['available_cash']:.2f}\n"
+                f"📦 <b>Alokasi Terpakai:</b> ${summary['allocated_usd']:.2f} ({summary['open_count']} posisi aktif)\n"
+                f"🔄 <b>Unrealized Floating:</b> {fl_sign}${abs(fl_usd):.2f}\n"
+                f"────────────────────────\n"
+                f"📈 <b>REALISASI TRADE (CLOSED: {len(closed)})</b>\n"
+                f"• Realized PnL: <b>{real_sign}${abs(real_usd):.2f}</b>\n"
+                f"• Win Rate: <b>{win_rate:.1f}%</b> ({len(wins)}W / {len(losses)}L)\n"
+                f"• Best Runner: <b>${best_sym} ({best_ret:+.1f}%)</b> 🚀\n"
+                f"• Avg Win: <b>{avg_win:+.1f}%</b> | Avg Loss: <b>{avg_loss:+.1f}%</b>\n"
+                f"• PINTU_A Realized: <b>{pintu_a_pnl:+.2f} USD</b> ({len(pintu_a_trades)} trades)\n"
+                f"• PINTU_B Realized: <b>{pintu_b_pnl:+.2f} USD</b> ({len(pintu_b_trades)} trades)\n"
+                f"────────────────────────\n"
+                f"ℹ️ <i>Gunakan /checkpoint_now untuk laporan audit model & statistik recall lengkap.</i>"
+            )
+
+            await self._bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
         except Exception as e:
-            logger.debug(f"[Telegram] /pnl error: {e}")
+            logger.error(f"[Telegram] /pnl error: {e}")
 
     async def _cmd_positions(self, chat_id: int) -> None:
         try:
             from src.paper_trading.position_tracker import position_tracker
-            from src.database.client import db_manager
+            import html as _html
 
-            rows = await db_manager.query(
-                "paper_trade_positions",
-                filters={"exit_reason": "eq.OPEN"},
-                limit=20
+            summary = await position_tracker.get_portfolio_summary()
+            open_positions = summary.get("open_positions", [])
+
+            lines = [
+                "💼 <b>PORTOFOLIO SIMULASI LIVE</b>",
+                "─" * 30,
+                f"💵 Cash Tersedia: <b>${summary['available_cash']:.2f}</b>",
+                f"📦 Alokasi Aktif: <b>${summary['allocated_usd']:.2f}</b> ({summary['open_count']}/10 posisi)",
+            ]
+
+            fl_usd = summary["total_floating_usd"]
+            fl_sign = "+" if fl_usd >= 0 else "-"
+            allocated = max(summary["allocated_usd"], 1.0)
+            lines.append(
+                f"🔄 Floating PnL: <b>{fl_sign}${abs(fl_usd):.2f}</b> "
+                f"({fl_usd / allocated * 100.0:+.1f}%)"
             )
-            if not rows:
-                await self._bot.send_message(
-                    chat_id=chat_id, text="📊 Tidak ada posisi aktif saat ini.", parse_mode="HTML"
-                )
-                return
+            roi_sign = "+" if summary["portfolio_roi_pct"] >= 0 else ""
+            lines.append(
+                f"💎 Total Ekuitas: <b>${summary['total_equity']:.2f}</b> "
+                f"(<b>{roi_sign}{summary['portfolio_roi_pct']:.1f}%</b>)"
+            )
+            lines.append("─" * 30)
 
-            lines = [f"📊 <b>Posisi Aktif ({len(rows)})</b>"]
-            for r in rows:
-                import html as _html
-                sym = _html.escape(r.get("symbol", "?"))
-                entry = r.get("entry_price_usd", 0.0) or 0.0
-                high = r.get("price_high_ever_seen", 0.0) or 0.0
-                mfe_est = ((high - entry) / entry * 100.0) if entry > 0 else 0.0
-                src = r.get("signal_source", "?")
-                lines.append(f"• ${sym} | {src} | Entry ${entry:.6f} | MFE est: {mfe_est:+.0f}%")
+            if not open_positions:
+                lines.append("\nℹ️ <i>Tidak ada posisi aktif saat ini. Menunggu sinyal baru...</i>")
+            else:
+                lines.append(f"📊 <b>POSISI AKTIF ({len(open_positions)})</b>\n")
+                for p in open_positions:
+                    sym = _html.escape(p["symbol"])
+                    addr = p["token_address"]
+                    src = p["signal_source"]
+                    e_price = f"${p['entry_price']:.8f}" if p['entry_price'] < 0.01 else f"${p['entry_price']:.6f}"
+                    c_price = f"${p['current_price']:.8f}" if p['current_price'] < 0.01 else f"${p['current_price']:.6f}"
+                    e_mcap = format_mcap(p["entry_mcap"])
+                    c_mcap = format_mcap(p["current_mcap"])
+                    fl_pct = p["floating_pct"]
+                    fl_emoji = "🟢" if fl_pct >= 0 else "🔴"
+                    pnl_u = p["floating_usd"]
+                    pnl_u_sign = "+" if pnl_u >= 0 else "-"
+
+                    lines.append(
+                        f"🔹 <b>${sym}</b> [{src}]\n"
+                        f"📍 <code>{addr}</code>\n"
+                        f"• Entry: <b>{e_price}</b> (MC: <b>{e_mcap}</b>)\n"
+                        f"• Live: <b>{c_price}</b> (MC: <b>{c_mcap}</b>)\n"
+                        f"• Floating: <b>{fl_pct:+.1f}% ({pnl_u_sign}${abs(pnl_u):.2f})</b> {fl_emoji}\n"
+                        f"• Highest: <b>+{p['mfe_pct']:.1f}%</b> | Di-hold: <b>{p['hold_minutes']:.0f}m</b>\n"
+                        f"• Rules: SL <b>-30%</b> | TP1 <b>+100%</b>\n"
+                    )
 
             await self._bot.send_message(
-                chat_id=chat_id, text="\n".join(lines), parse_mode="HTML"
+                chat_id=chat_id, text="\n".join(lines), parse_mode="HTML", disable_web_page_preview=True
             )
         except Exception as e:
-            logger.debug(f"[Telegram] /positions error: {e}")
+            logger.error(f"[Telegram] /positions error: {e}")
 
     async def _cmd_checkpoint(self, chat_id: int) -> None:
         try:

@@ -37,9 +37,11 @@ async def record_signal(
     is_baseline = score < settings.opportunity_threshold
 
     # Fetch entry price via 3-tier price feed
-    price_snap = await fetch_price(event.token_address)
+    bc_addr = getattr(event, "bonding_curve_address", None)
+    price_snap = await fetch_price(event.token_address, bc_addr)
     entry_price = price_snap.price_usd if price_snap else 0.0
     entry_liq = price_snap.liquidity_usd if price_snap else 0.0
+    entry_mcap = price_snap.market_cap_usd if price_snap else 0.0
 
     now_utc = datetime.now(tz=timezone.utc).isoformat()
     signal_id = str(uuid.uuid4())
@@ -77,7 +79,7 @@ async def record_signal(
         signal_type = "BASELINE" if is_baseline else "SIGNAL"
         logger.info(
             f"📝 [{signal_type}] Recorded: {event.symbol} ({event.token_address[:8]}...) | "
-            f"Score: {score:.1f} | Entry: ${entry_price:.8f} | Liq: ${entry_liq:,.0f} | "
+            f"Score: {score:.1f} | Entry: ${entry_price:.8f} | MC: ${entry_mcap:,.0f} | Liq: ${entry_liq:,.0f} | "
             f"Source: {signal_source}"
         )
 
@@ -92,7 +94,8 @@ async def record_signal(
                 entry_price_usd=entry_price,
                 entry_liquidity_usd=entry_liq,
                 launch_venue=event.launch_venue,
-                is_baseline=False
+                is_baseline=False,
+                market_cap_usd=entry_mcap
             )
             if msg_id:
                 await db_manager.update(
@@ -102,7 +105,7 @@ async def record_signal(
                 )
 
             # Paper Trading Live: open virtual position
-            asyncio.create_task(_open_virtual_position(event, score, signal_id, entry_price))
+            asyncio.create_task(_open_virtual_position(event, score, signal_id, entry_price, entry_mcap))
 
         return signal_id
 
@@ -116,6 +119,7 @@ async def _open_virtual_position(
     opportunity_score: float,
     signal_id: str,
     entry_price: Optional[float] = None,
+    entry_market_cap_usd: Optional[float] = None,
 ) -> None:
     """
     Background task: open a virtual position in PositionTracker.
@@ -128,6 +132,7 @@ async def _open_virtual_position(
             opportunity_score=opportunity_score,
             paper_signal_id=signal_id,
             entry_price=entry_price,
+            entry_market_cap_usd=entry_market_cap_usd,
         )
     except Exception as e:
         logger.warning(f"[SignalRecorder] open_virtual_position failed for {event.token_address[:8]}: {e}")

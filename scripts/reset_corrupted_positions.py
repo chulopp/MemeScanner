@@ -6,16 +6,16 @@ from datetime import datetime, timezone
 from src.database.client import db_manager
 from src.utils.logger import logger
 
-CORRUPTED_SYMBOLS = ["WOFI", "MANIFEST"]
+CORRUPTED_SYMBOLS = ["WOFI", "MANIFEST", "HOOD"]
 
 async def main():
     db_manager.connect()
     now_utc = datetime.now(tz=timezone.utc).isoformat()
     
     for sym in CORRUPTED_SYMBOLS:
-        positions = await db_manager.query("paper_trade_positions", filters={"symbol": f"eq.{sym}", "exit_reason": "eq.OPEN"})
+        positions = await db_manager.query("paper_trade_positions", filters={"symbol": f"eq.{sym}"})
         if not positions:
-            logger.info(f"No open position found for {sym}")
+            logger.info(f"No position found for {sym}")
             continue
         for pos in positions:
             pos_id = pos["id"]

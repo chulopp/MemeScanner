@@ -117,6 +117,9 @@ class MemeScannerApp:
         console.print(f"[dim]PumpPortal WS: {settings.pumpportal_ws_url}[/dim]")
         console.print("[bold cyan]========================================================[/bold cyan]\n")
 
+        # Initialize Database connection immediately on startup
+        db_manager.connect()
+
         # Start background periodic smart money evaluator
         self._evaluator_task = asyncio.create_task(self._periodic_smart_money_evaluator())
 

@@ -251,6 +251,12 @@ class PositionTracker:
         STARTING_CAPITAL = 100.0
         POSITION_SIZE = FROZEN_PARAMS["position_size_usd"]
 
+        if not db_manager._connected:
+            db_manager.connect()
+
+        # Always sync with DB open positions
+        await self._recover_open_positions()
+
         all_trades = await db_manager.query("paper_trade_positions", limit=5000)
         closed = [
             t for t in all_trades
@@ -540,21 +546,22 @@ class PositionTracker:
             logger.debug(f"[PositionTracker] Failed to record skipped signal: {e}")
 
     async def _recover_open_positions(self) -> None:
-        """On startup, recover positions with exit_reason = 'OPEN' from DB."""
+        """On startup or on demand, recover positions with exit_reason = 'OPEN' from DB."""
         try:
+            if not db_manager._connected:
+                db_manager.connect()
             rows = await db_manager.query(
                 "paper_trade_positions",
                 filters={"exit_reason": "eq.OPEN"},
                 limit=FROZEN_PARAMS["max_active_positions"] + 5
             )
             if not rows:
-                logger.info("ℹ️ [PositionTracker] No open positions to recover")
                 return
 
             recovered = 0
             for row in rows:
                 pos_id = row.get("id")
-                if not pos_id:
+                if not pos_id or pos_id in self._active:
                     continue
 
                 entry_time_str = row.get("entry_time", "")

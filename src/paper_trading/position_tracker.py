@@ -361,6 +361,12 @@ class PositionTracker:
         interval = FROZEN_PARAMS["poll_interval_seconds"]
         while self._running:
             if self._active:
+                now_str = datetime.now(tz=timezone.utc).strftime("%H:%M:%S UTC")
+                logger.info(
+                    f"🔁 [PricePoll] {now_str} — Fetching prices for "
+                    f"{len(self._active)} active position(s): "
+                    f"{', '.join(p.symbol for p in self._active.values())}"
+                )
                 # Process all open positions concurrently
                 tasks = [
                     self._evaluate_position(pos)
@@ -375,6 +381,7 @@ class PositionTracker:
         try:
             snap = await fetch_price(pos.token_address, pos.bonding_curve_address)
             if not snap or snap.price_usd <= 0:
+                logger.warning(f"⚠️ [PricePoll] No price for ${pos.symbol} ({pos.token_address[:8]}...)")
                 return
 
             current_price = snap.price_usd
@@ -383,6 +390,10 @@ class PositionTracker:
                 return
 
             return_pct = ((current_price - entry) / entry) * 100.0
+            logger.debug(
+                f"💹 [PricePoll] ${pos.symbol} | src={snap.source} | "
+                f"price=${current_price:.8f} | ret={return_pct:+.1f}%"
+            )
 
             # Update MFE
             if current_price > pos.price_high_ever_seen:

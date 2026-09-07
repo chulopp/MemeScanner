@@ -499,6 +499,7 @@ class TelegramNotifier:
                 BotCommand("status", "🤖 Status bot & kapasitas posisi"),
                 BotCommand("positions", "📊 Daftar posisi aktif & floating MFE"),
                 BotCommand("pnl", "💰 Ringkasan performa & win rate"),
+                BotCommand("history", "📜 Riwayat trade terakhir (5/10/30)"),
                 BotCommand("checkpoint_now", "📋 Laporan audit checkpoint"),
             ]
             await self._bot.set_my_commands(commands)
@@ -506,7 +507,7 @@ class TelegramNotifier:
         except Exception as cmd_err:
             logger.debug(f"[Telegram] Failed to register menu commands: {cmd_err}")
 
-        logger.info("🤖 [Telegram] Starting command listener (commands: /menu /status /pnl /positions /checkpoint_now)")
+        logger.info("🤖 [Telegram] Starting command listener (commands: /menu /status /pnl /positions /history /checkpoint_now)")
         asyncio.create_task(self._command_poll_loop())
 
     async def _command_poll_loop(self) -> None:
@@ -542,6 +543,14 @@ class TelegramNotifier:
                                 asyncio.create_task(self._cmd_checkpoint(cb_chat))
                             elif action == "cmd_menu":
                                 asyncio.create_task(self._cmd_menu(cb_chat))
+                            elif action == "cmd_history":
+                                asyncio.create_task(self._cmd_history(cb_chat, limit=5))
+                            elif action.startswith("cmd_history_"):
+                                try:
+                                    n = int(action.split("_")[-1])
+                                except ValueError:
+                                    n = 5
+                                asyncio.create_task(self._cmd_history(cb_chat, limit=n))
                         continue
 
                     message = update.message
@@ -561,8 +570,17 @@ class TelegramNotifier:
                         asyncio.create_task(self._cmd_pnl(message.chat.id))
                     elif text.startswith(("/positions", "📊 posisi aktif")):
                         asyncio.create_task(self._cmd_positions(message.chat.id))
-                    elif text.startswith(("/checkpoint_now", "📋 audit checkpoint")):
+                    elif text.startswith("/checkpoint_now") or text.startswith("📋 audit checkpoint"):
                         asyncio.create_task(self._cmd_checkpoint(message.chat.id))
+                    elif text.startswith("/history") or text.startswith("📜 history"):
+                        # /history [5|10|30]
+                        parts = text.split()
+                        try:
+                            n = int(parts[1]) if len(parts) > 1 else 5
+                            n = n if n in (5, 10, 30) else 5
+                        except (ValueError, IndexError):
+                            n = 5
+                        asyncio.create_task(self._cmd_history(message.chat.id, limit=n))
 
             except Exception as e:
                 logger.debug(f"[Telegram] Command poll error: {e}")
@@ -727,6 +745,97 @@ class TelegramNotifier:
         except Exception as e:
             logger.debug(f"[Telegram] /checkpoint_now error: {e}")
 
+    async def _cmd_history(self, chat_id: int, limit: int = 5) -> None:
+        """Tampilkan riwayat trade terakhir dengan inline keyboard untuk memilih jumlah."""
+        try:
+            from src.database.client import db_manager
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            import html as _html
+
+            if not db_manager._connected:
+                db_manager.connect()
+
+            # Send selector keyboard first
+            selector_kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("5 Terakhir", callback_data="cmd_history_5"),
+                    InlineKeyboardButton("10 Terakhir", callback_data="cmd_history_10"),
+                    InlineKeyboardButton("30 Terakhir", callback_data="cmd_history_30"),
+                ]
+            ])
+
+            all_trades = await db_manager.query("paper_trade_positions", limit=5000)
+            closed = [
+                t for t in all_trades
+                if t.get("exit_reason") not in ("OPEN", None, "CORRUPTED_RESET")
+                and not t.get("skipped_reason")
+            ]
+
+            # Sort by exit_time descending (most recent first)
+            def _parse_dt(t):
+                et = t.get("exit_time") or t.get("entry_time") or ""
+                return et if isinstance(et, str) else ""
+
+            closed.sort(key=_parse_dt, reverse=True)
+            selected = closed[:limit]
+
+            if not selected:
+                await self._bot.send_message(
+                    chat_id=chat_id,
+                    text="📜 <b>History Trade</b>\n\nBelum ada trade yang selesai.",
+                    parse_mode="HTML",
+                    reply_markup=selector_kb,
+                )
+                return
+
+            lines = [
+                f"📜 <b>RIWAYAT TRADE — {limit} TERAKHIR</b>",
+                f"<i>(Total closed: {len(closed)})</i>",
+                "─" * 28,
+            ]
+
+            for i, t in enumerate(selected, 1):
+                sym = _html.escape(t.get("symbol") or "?")
+                addr = t.get("token_address", "")[:12]
+                ret = float(t.get("realized_return_pct") or 0.0)
+                reason = t.get("exit_reason") or "-"
+                src = t.get("signal_source") or "-"
+                hold = float(t.get("hold_duration_minutes") or 0.0)
+                entry_p = float(t.get("entry_price_usd") or 0.0)
+                exit_p = float(t.get("exit_price_usd") or 0.0)
+                score = float(t.get("opportunity_score_at_entry") or 0.0)
+
+                # Emojis
+                ret_emoji = "🟢" if ret > 0 else "🔴"
+                reason_emoji = {
+                    "SL": "🛑", "TP1": "✅", "TP2": "📚", "TP3": "💎", "TRAILING": "🌙"
+                }.get(reason, "📋")
+
+                entry_str = f"${entry_p:.8f}" if entry_p < 0.01 else f"${entry_p:.6f}"
+                exit_str = f"${exit_p:.8f}" if 0 < exit_p < 0.01 else (f"${exit_p:.6f}" if exit_p > 0 else "N/A")
+
+                lines.append(
+                    f"\n{i}. {ret_emoji} <b>${sym}</b> [{src}]\n"
+                    f"   {reason_emoji} Exit: <b>{ret:+.1f}%</b> via {reason}\n"
+                    f"   ⏱ Hold: <b>{hold:.0f}m</b> | Score: <b>{score:.0f}</b>\n"
+                    f"   💰 Entry: {entry_str} → Exit: {exit_str}\n"
+                    f"   <code>{addr}...</code>"
+                )
+
+            msg_text = "\n".join(lines)
+            if len(msg_text) > 4000:
+                msg_text = msg_text[:3990] + "\n<i>...(truncated)</i>"
+
+            await self._bot.send_message(
+                chat_id=chat_id,
+                text=msg_text,
+                parse_mode="HTML",
+                reply_markup=selector_kb,
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            logger.error(f"[Telegram] /history error: {e}")
+
     async def _cmd_menu(self, chat_id: int) -> None:
         """Kirim menu interaktif dengan tombol Inline dan Keyboard Shortcuts."""
         try:
@@ -741,13 +850,17 @@ class TelegramNotifier:
                 [
                     InlineKeyboardButton("💰 Ringkasan PnL", callback_data="cmd_pnl"),
                     InlineKeyboardButton("📋 Audit Checkpoint", callback_data="cmd_checkpoint"),
+                ],
+                [
+                    InlineKeyboardButton("📜 History Trade", callback_data="cmd_history"),
                 ]
             ])
 
             # 2. Reply Keyboard (shortcut permanen di bawah input keyboard HP)
             reply_kb = ReplyKeyboardMarkup([
                 [KeyboardButton("🤖 Status"), KeyboardButton("📊 Posisi Aktif")],
-                [KeyboardButton("💰 PnL"), KeyboardButton("📋 Audit Checkpoint")]
+                [KeyboardButton("💰 PnL"), KeyboardButton("📋 Audit Checkpoint")],
+                [KeyboardButton("📜 History Trade")]
             ], resize_keyboard=True)
 
             text = (

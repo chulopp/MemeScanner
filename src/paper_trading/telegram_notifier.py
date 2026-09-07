@@ -268,23 +268,24 @@ class TelegramNotifier:
         if not self._bot:
             return None
 
+        import html as _html
         status_emoji = {"runner": "🚀", "dead": "💀", "neutral": "⟶"}.get(status, "❓")
 
         text = (
-            f"📋 Outcome [{time_window}]: ${symbol}\n"
-            f"`{token_address[:12]}...`\n"
+            f"📋 <b>Outcome [{time_window}]</b>: ${_html.escape(symbol)}\n"
+            f"<code>{token_address}</code>\n"
             f"\n"
-            f"📈 Return: {return_pct:+.1f}%\n"
-            f"🏔 ATH: {ath_return_pct:+.1f}%\n"
-            f"📉 Max Drawdown: {mae_pct:.1f}%\n"
-            f"{status_emoji} Status: {status.upper()}"
+            f"📈 Return: <b>{return_pct:+.1f}%</b>\n"
+            f"🏔 ATH: <b>{ath_return_pct:+.1f}%</b>\n"
+            f"📉 Max Drawdown: <b>{mae_pct:.1f}%</b>\n"
+            f"{status_emoji} Status: <b>{status.upper()}</b>"
         )
 
         try:
             msg = await self._bot.send_message(
                 chat_id=self._chat_id,
                 text=text,
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 disable_web_page_preview=True
             )
             return msg.message_id
@@ -367,7 +368,7 @@ class TelegramNotifier:
 
         text = (
             f"{tier_emoji} <b>{tier} Hit (+{return_pct:.0f}%)</b>: ${_html.escape(symbol)}\n"
-            f"<code>{token_address[:20]}...</code>\n"
+            f"<code>{token_address}</code>\n"
             f"{price_info}{mcap_growth}\n"
             f"📈 Return saat ini: <b>{return_pct:+.1f}%</b>\n"
             f"💰 Dijual: <b>{sell_fraction*100:.0f}% posisi</b>\n"
@@ -412,7 +413,7 @@ class TelegramNotifier:
 
         text = (
             f"🛑 <b>Stop Loss</b>: ${_html.escape(symbol)}\n"
-            f"<code>{token_address[:20]}...</code>\n"
+            f"<code>{token_address}</code>\n"
             f"{price_trajectory}{mcap_trajectory}\n"
             f"📉 Return: <b>{return_pct:+.1f}%</b>\n"
             f"⏱ Di-hold: <b>{hold_minutes:.0f} menit</b>\n"
@@ -452,7 +453,7 @@ class TelegramNotifier:
 
         text = (
             f"🌙 <b>Trailing Stop (Moonbag)</b>: ${_html.escape(symbol)}\n"
-            f"<code>{token_address[:20]}...</code>\n"
+            f"<code>{token_address}</code>\n"
             f"{mcap_growth}\n"
             f"🏔 MFE (puncak tertinggi): <b>{mfe_pct:+.1f}%</b>\n"
             f"📈 Return terealisasi: <b>{return_pct:+.1f}%</b>\n"
@@ -633,6 +634,8 @@ class TelegramNotifier:
             best_trade = max(closed, key=lambda t: float(t.get("realized_return_pct", 0.0) or 0.0)) if closed else None
             best_sym = _html.escape(best_trade.get("symbol", "-")) if best_trade else "-"
             best_ret = float(best_trade.get("realized_return_pct", 0.0) or 0.0) if best_trade else 0.0
+            best_addr = best_trade.get("token_address", "") if best_trade else ""
+            best_addr_line = f"\n  <code>{best_addr}</code>" if best_addr else ""
 
             pintu_a_trades = [t for t in closed if t.get("signal_source") == "PINTU_A"]
             pintu_b_trades = [t for t in closed if t.get("signal_source") == "PINTU_B"]
@@ -658,7 +661,7 @@ class TelegramNotifier:
                 f"📈 <b>REALISASI TRADE (CLOSED: {len(closed)})</b>\n"
                 f"• Realized PnL: <b>{real_sign}${abs(real_usd):.2f}</b>\n"
                 f"• Win Rate: <b>{win_rate:.1f}%</b> ({len(wins)}W / {len(losses)}L)\n"
-                f"• Best Runner: <b>${best_sym} ({best_ret:+.1f}%)</b> 🚀\n"
+                f"• Best Runner: <b>${best_sym} ({best_ret:+.1f}%)</b> 🚀{best_addr_line}\n"
                 f"• Avg Win: <b>{avg_win:+.1f}%</b> | Avg Loss: <b>{avg_loss:+.1f}%</b>\n"
                 f"• PINTU_A Realized: <b>{pintu_a_pnl:+.2f} USD</b> ({len(pintu_a_trades)} trades)\n"
                 f"• PINTU_B Realized: <b>{pintu_b_pnl:+.2f} USD</b> ({len(pintu_b_trades)} trades)\n"
@@ -794,9 +797,10 @@ class TelegramNotifier:
                 "─" * 28,
             ]
 
+            trade_blocks = []
             for i, t in enumerate(selected, 1):
                 sym = _html.escape(t.get("symbol") or "?")
-                addr = t.get("token_address", "")[:12]
+                addr = t.get("token_address", "")
                 ret = float(t.get("realized_return_pct") or 0.0)
                 reason = t.get("exit_reason") or "-"
                 src = t.get("signal_source") or "-"
@@ -814,25 +818,43 @@ class TelegramNotifier:
                 entry_str = f"${entry_p:.8f}" if entry_p < 0.01 else f"${entry_p:.6f}"
                 exit_str = f"${exit_p:.8f}" if 0 < exit_p < 0.01 else (f"${exit_p:.6f}" if exit_p > 0 else "N/A")
 
-                lines.append(
-                    f"\n{i}. {ret_emoji} <b>${sym}</b> [{src}]\n"
+                block = (
+                    f"{i}. {ret_emoji} <b>${sym}</b> [{src}]\n"
                     f"   {reason_emoji} Exit: <b>{ret:+.1f}%</b> via {reason}\n"
                     f"   ⏱ Hold: <b>{hold:.0f}m</b> | Score: <b>{score:.0f}</b>\n"
                     f"   💰 Entry: {entry_str} → Exit: {exit_str}\n"
-                    f"   <code>{addr}...</code>"
+                    f"   <code>{addr}</code>"
                 )
+                trade_blocks.append(block)
 
-            msg_text = "\n".join(lines)
-            if len(msg_text) > 4000:
-                msg_text = msg_text[:3990] + "\n<i>...(truncated)</i>"
-
-            await self._bot.send_message(
-                chat_id=chat_id,
-                text=msg_text,
-                parse_mode="HTML",
-                reply_markup=selector_kb,
-                disable_web_page_preview=True,
+            # Chunk messages cleanly if needed to avoid exceeding Telegram's 4096 character limit
+            header = (
+                f"📜 <b>RIWAYAT TRADE — {limit} TERAKHIR</b>\n"
+                f"<i>(Total closed: {len(closed)})</i>\n"
+                f"{'─' * 28}\n"
             )
+
+            chunks = []
+            curr_text = header
+            for block in trade_blocks:
+                item_text = "\n\n" + block
+                if len(curr_text) + len(item_text) > 3800:
+                    chunks.append(curr_text)
+                    curr_text = block
+                else:
+                    curr_text += item_text
+            if curr_text:
+                chunks.append(curr_text)
+
+            for idx, chunk in enumerate(chunks):
+                kb = selector_kb if idx == len(chunks) - 1 else None
+                await self._bot.send_message(
+                    chat_id=chat_id,
+                    text=chunk,
+                    parse_mode="HTML",
+                    reply_markup=kb,
+                    disable_web_page_preview=True,
+                )
         except Exception as e:
             logger.error(f"[Telegram] /history error: {e}")
 

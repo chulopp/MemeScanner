@@ -45,10 +45,11 @@ FROZEN_PARAMS = {
     "tp3_sell_fraction": 0.20,        # Sell 20% of position at TP3
     "moonbag_fraction": 0.20,         # 20% moonbag after TP3
     "trailing_stop_from_ath_pct": 40.0,  # Exit moonbag if drops 40% from ATH
+    "max_hold_hours": 4.0,            # Max hold duration: 4 hours timeout exit
     "position_size_usd": 2.0,         # $2 per trade (2% of $100 virtual)
     "max_active_positions": 10,       # Max simultaneous open positions
     "poll_interval_seconds": 30,      # Price polling cadence
-    "parameter_version": "v1.0",      # Bump on any change post-Day-40
+    "parameter_version": "v1.1",      # Bump on 4H timeout introduction
 }
 
 POLL_DISCLAIMER = (
@@ -430,6 +431,16 @@ class PositionTracker:
                 await self._close_position(pos, current_price, "SL")
                 return
 
+            # ── Max Hold Duration (Timeout 4 Jam) ──
+            hold_hours = (datetime.now(tz=timezone.utc) - pos.entry_time).total_seconds() / 3600.0
+            if hold_hours >= FROZEN_PARAMS.get("max_hold_hours", 4.0):
+                logger.info(
+                    f"⌛ [TIMEOUT_4H] ${pos.symbol} reached max hold time ({hold_hours:.1f}h >= {FROZEN_PARAMS.get('max_hold_hours', 4.0)}h) — "
+                    f"closing at market ${current_price:.8f} (ret: {return_pct:+.1f}%)"
+                )
+                await self._close_position(pos, current_price, "TIMEOUT_4H")
+                return
+
             # ── TP1: +100% ──
             if not pos.tp1_hit and return_pct >= FROZEN_PARAMS["tp1_pct"]:
                 pos.tp1_hit = True
@@ -523,7 +534,7 @@ class PositionTracker:
         except Exception as e:
             logger.error(f"❌ [PositionTracker] Failed to close position {pos.position_id[:8]}: {e}")
 
-        status_emoji = {"SL": "🛑", "TP1": "✅", "TP2": "💚", "TP3": "💎", "TRAILING": "🌙"}.get(reason, "📋")
+        status_emoji = {"SL": "🛑", "TP1": "✅", "TP2": "💚", "TP3": "💎", "TRAILING": "🌙", "TIMEOUT_4H": "⌛"}.get(reason, "📋")
         logger.info(
             f"{status_emoji} [Closed {reason}] ${pos.symbol} | "
             f"Return: {realized_return_pct:+.1f}% | MFE: {mfe_pct:+.1f}% | "
@@ -717,6 +728,19 @@ class PositionTracker:
                     token_address=pos.token_address,
                     return_pct=realized_return_pct,
                     mfe_pct=mfe_pct,
+                    entry_price=pos.entry_price_usd,
+                    exit_price=exit_price,
+                    entry_mcap=pos.entry_market_cap_usd,
+                    exit_mcap=exit_mcap,
+                    opportunity_score=pos.opportunity_score,
+                    signal_source=pos.signal_source,
+                )
+            elif reason == "TIMEOUT_4H":
+                await telegram_notifier.send_timeout_hit(
+                    symbol=pos.symbol,
+                    token_address=pos.token_address,
+                    return_pct=realized_return_pct,
+                    hold_minutes=(datetime.now(tz=timezone.utc) - pos.entry_time).total_seconds() / 60.0,
                     entry_price=pos.entry_price_usd,
                     exit_price=exit_price,
                     entry_mcap=pos.entry_market_cap_usd,

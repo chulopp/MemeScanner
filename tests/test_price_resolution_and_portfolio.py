@@ -109,3 +109,45 @@ async def test_rpc_fallback_circuit_breaker():
     # In cooldown mode, candidates will prioritize FALLBACK_RPCS
     now = time.time()
     assert now < client._cooldown_until
+
+
+@pytest.mark.asyncio
+async def test_4h_timeout_exit(monkeypatch):
+    """Verify that positions exceeding 4 hours are closed with TIMEOUT_4H."""
+    from datetime import timedelta
+    entry_time = datetime.now(tz=timezone.utc) - timedelta(hours=4.5)
+    test_pos = ActivePosition(
+        position_id="test-timeout-1",
+        token_address="TestTimeout11111111111111111111111111111111pump",
+        symbol="OLDCOIN",
+        signal_source="PINTU_A",
+        entry_price_usd=0.001,
+        entry_time=entry_time,
+        position_size_usd=2.0,
+        price_high_ever_seen=0.0011,
+        latest_price_usd=0.0009,
+        latest_mcap_usd=900.0,
+    )
+    position_tracker._active["test-timeout-1"] = test_pos
+
+    closed_reasons = []
+
+    async def mock_close(pos, exit_price, reason):
+        closed_reasons.append(reason)
+        position_tracker._active.pop(pos.position_id, None)
+
+    monkeypatch.setattr(position_tracker, "_close_position", mock_close)
+
+    from src.paper_trading.price_fetcher import PriceSnapshot
+
+    async def mock_fetch_price(mint, bc):
+        return PriceSnapshot(price_usd=0.0009, liquidity_usd=1000.0, volume_24h_usd=0.0, source="dexscreener")
+
+    import sys
+    pt_mod = sys.modules["src.paper_trading.position_tracker"]
+    monkeypatch.setattr(pt_mod, "fetch_price", mock_fetch_price)
+
+    await position_tracker._evaluate_position(test_pos)
+
+    assert "TIMEOUT_4H" in closed_reasons
+    assert "test-timeout-1" not in position_tracker._active

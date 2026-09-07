@@ -287,7 +287,8 @@ class TelegramNotifier:
                     "TP1": f"🎯 TP1 Hit ({ret:+.1f}%)",
                     "TP2": f"🎯 TP2 Hit ({ret:+.1f}%)",
                     "TP3": f"🎯 TP3 Hit ({ret:+.1f}%)",
-                    "TRAILING": f"🌙 Trailing Stop ({ret:+.1f}%)"
+                    "TRAILING": f"🌙 Trailing Stop ({ret:+.1f}%)",
+                    "TIMEOUT_4H": f"⌛ Timeout 4H ({ret:+.1f}%)"
                 }.get(reason, f"Ditutup ({reason})")
                 trade_line = f"\n\n🤖 <b>Paper Trade:</b> ✅ Followed ({source} | Score: {score:.1f})\n• Hasil: <b>{reason_str}</b>"
             elif pt_status == "SKIPPED":
@@ -506,6 +507,56 @@ class TelegramNotifier:
         except Exception as e:
             logger.debug(f"send_trailing_stop_hit failed: {e}")
 
+    async def send_timeout_hit(
+        self,
+        symbol: str,
+        token_address: str,
+        return_pct: float,
+        hold_minutes: float,
+        entry_price: float = 0.0,
+        exit_price: float = 0.0,
+        entry_mcap: float = 0.0,
+        exit_mcap: float = 0.0,
+        opportunity_score: float = 0.0,
+        signal_source: str = "",
+    ) -> None:
+        """Notif saat posisi ditutup karena melebihi batas waktu maksimal hold (4 jam)."""
+        if not self._enabled:
+            return
+        self._ensure_bot()
+        if not self._bot:
+            return
+
+        import html as _html
+        mcap_trajectory = ""
+        if entry_mcap > 0 and exit_mcap > 0:
+            mcap_trajectory = f"\n🧢 MC: <b>{format_mcap(entry_mcap)} ➔ {format_mcap(exit_mcap)}</b>"
+
+        price_trajectory = ""
+        if entry_price > 0 and exit_price > 0:
+            p_entry = f"${entry_price:.8f}" if entry_price < 0.01 else f"${entry_price:.6f}"
+            p_exit = f"${exit_price:.8f}" if exit_price < 0.01 else f"${exit_price:.6f}"
+            price_trajectory = f"\n💰 Entry: <b>{p_entry}</b> ➔ Exit: <b>{p_exit}</b>"
+
+        sig_info = f" ({signal_source} | Score: {opportunity_score:.1f})" if opportunity_score > 0 else ""
+        ret_emoji = "🟢" if return_pct >= 0 else "🔴"
+
+        text = (
+            f"⌛ <b>Timeout Exit (4 Jam)</b>: ${_html.escape(symbol)}{sig_info}\n"
+            f"<code>{token_address}</code>\n"
+            f"{price_trajectory}{mcap_trajectory}\n"
+            f"{ret_emoji} Return: <b>{return_pct:+.1f}%</b>\n"
+            f"⏱ Di-hold: <b>{hold_minutes / 60.0:.1f} jam ({hold_minutes:.0f} menit)</b>\n"
+            f"💡 <i>Posisi ditutup untuk merotasi modal & membebaskan slot portofolio.</i>"
+        )
+        try:
+            await self._bot.send_message(
+                chat_id=self._chat_id, text=text, parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+        except Exception as e:
+            logger.debug(f"send_timeout_hit failed: {e}")
+
     # ──────────────────────────────────────────
     # Read-only Telegram command listener
     # ──────────────────────────────────────────
@@ -638,8 +689,7 @@ class TelegramNotifier:
                 f"Threshold (frozen): <b>{FROZEN_PARAMS['opportunity_threshold']:.0f}</b>\n"
                 f"SL: <b>{FROZEN_PARAMS['stop_loss_pct']:.0f}%</b> | "
                 f"TP1: <b>+{FROZEN_PARAMS['tp1_pct']:.0f}%</b> | "
-                f"TP2: <b>+{FROZEN_PARAMS['tp2_pct']:.0f}%</b> | "
-                f"TP3: <b>+{FROZEN_PARAMS['tp3_pct']:.0f}%</b>\n"
+                f"Max Hold: <b>{FROZEN_PARAMS.get('max_hold_hours', 4.0):.0f}h</b>\n"
                 f"Parameter version: <b>{FROZEN_PARAMS['parameter_version']}</b>"
             )
             await self._bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
@@ -759,7 +809,7 @@ class TelegramNotifier:
                         f"• Live: <b>{c_price}</b> (MC: <b>{c_mcap}</b>)\n"
                         f"• Floating: <b>{fl_pct:+.1f}% ({pnl_u_sign}${abs(pnl_u):.2f})</b> {fl_emoji}\n"
                         f"• Highest: <b>+{p['mfe_pct']:.1f}%</b> | Di-hold: <b>{p['hold_minutes']:.0f}m</b>\n"
-                        f"• Rules: SL <b>-30%</b> | TP1 <b>+100%</b>\n"
+                        f"• Rules: SL <b>-30%</b> | TP1 <b>+100%</b> | Max <b>4h</b>\n"
                     )
 
             await self._bot.send_message(

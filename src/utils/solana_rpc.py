@@ -8,23 +8,34 @@ from src.config import settings
 from src.utils.logger import logger
 
 
+FALLBACK_RPCS = [
+    "https://solana-rpc.publicnode.com",
+    "https://api.mainnet-beta.solana.com",
+]
+
+
 class SolanaRpcClient:
-    """Async Solana RPC client with rate-limiting and robust error handling."""
+    """Async Solana RPC client with rate-limiting, circuit breaker, and automatic multi-node fallback."""
 
     def __init__(self, rpc_url: Optional[str] = None, max_concurrency: int = 5):
-        self.rpc_url = rpc_url or settings.helius_rpc_url
+        self.primary_rpc = rpc_url or settings.helius_rpc_url
         self.semaphore = asyncio.Semaphore(max_concurrency)
         self._client: Optional[httpx.AsyncClient] = None
         self._fee_cache: list[int] = []
         self._fee_cache_ts: float = 0.0
+        self._cooldown_until: float = 0.0
+
+    @property
+    def rpc_url(self) -> str:
+        return self.primary_rpc
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=10.0)
+            self._client = httpx.AsyncClient(timeout=8.0)
         return self._client
 
     async def _rpc_call(self, method: str, params: list[Any]) -> Optional[dict]:
-        """Generic JSON-RPC POST call with semaphore concurrency control."""
+        """Generic JSON-RPC POST call with circuit breaker and multi-node fallback."""
         async with self.semaphore:
             client = await self._get_client()
             payload = {
@@ -33,23 +44,35 @@ class SolanaRpcClient:
                 "method": method,
                 "params": params
             }
-            for attempt in range(3):
+
+            now = time.time()
+            if now < self._cooldown_until:
+                # Primary is on cooldown, prioritize fallbacks
+                candidates = list(FALLBACK_RPCS) + [self.primary_rpc]
+            else:
+                candidates = [self.primary_rpc] + list(FALLBACK_RPCS)
+
+            for url in candidates:
                 try:
-                    response = await client.post(self.rpc_url, json=payload)
+                    response = await client.post(url, json=payload)
                     if response.status_code == 200:
                         data = response.json()
                         if "error" in data:
-                            logger.debug(f"RPC Error ({method}): {data['error']}")
-                            return None
+                            logger.debug(f"RPC Error ({method}) on {url[:25]}...: {data['error']}")
+                            continue
                         return data.get("result")
                     elif response.status_code == 429:
-                        # Rate limit backoff: 0.5s, 1.0s, 2.0s
-                        await asyncio.sleep(0.5 * (2 ** attempt))
+                        if url == self.primary_rpc:
+                            self._cooldown_until = time.time() + 60.0
+                            logger.warning("⚠️ Primary RPC rate limited (429). Tripping circuit breaker for 60s → using fallback RPCs.")
+                        continue
                     else:
-                        logger.debug(f"RPC HTTP {response.status_code} for {method}")
+                        logger.debug(f"RPC HTTP {response.status_code} for {method} on {url[:25]}...")
+                        continue
                 except Exception as e:
-                    logger.debug(f"RPC Exception ({method}) attempt {attempt+1}: {e}")
-                    await asyncio.sleep(0.1 * (attempt + 1))
+                    logger.debug(f"RPC Exception ({method}) on {url[:25]}...: {e}")
+                    continue
+
             return None
 
     async def get_account_info(self, pubkey: str) -> Optional[dict]:

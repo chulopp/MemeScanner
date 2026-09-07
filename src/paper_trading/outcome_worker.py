@@ -116,32 +116,89 @@ class OutcomeWorker:
 
         logger.info(f"⏱ Scheduled 5 resolution windows for signal {signal_id[:8]}... ({symbol})")
 
+    async def _get_paper_trade_status(self, token_address: str, signal_id: str) -> Optional[dict]:
+        """Checks if a signal was followed in paper_trade_positions and retrieves its execution status."""
+        try:
+            trades = []
+            if signal_id:
+                try:
+                    import uuid as _uuid
+                    _uuid.UUID(str(signal_id))
+                    trades = await db_manager.query("paper_trade_positions", filters={"paper_signal_id": f"eq.{signal_id}"}, limit=1)
+                except (ValueError, TypeError):
+                    trades = []
+
+            if not trades and token_address:
+                trades = await db_manager.query("paper_trade_positions", filters={"token_address": f"eq.{token_address}"}, limit=1)
+            if not trades:
+                return None
+
+            trade = trades[0]
+            skipped_reason = trade.get("skipped_reason")
+            exit_reason = trade.get("exit_reason")
+            score = float(trade.get("opportunity_score_at_entry", 0.0) or 0.0)
+            source = trade.get("signal_source", "PINTU_A")
+
+            if skipped_reason:
+                return {
+                    "status": "SKIPPED",
+                    "reason": skipped_reason,
+                    "score": score,
+                    "source": source
+                }
+            elif exit_reason == "OPEN":
+                return {
+                    "status": "OPEN",
+                    "entry_price": float(trade.get("entry_price_usd", 0.0) or 0.0),
+                    "score": score,
+                    "source": source
+                }
+            else:
+                return {
+                    "status": "CLOSED",
+                    "exit_reason": exit_reason,
+                    "return_pct": float(trade.get("realized_return_pct", 0.0) or 0.0),
+                    "score": score,
+                    "source": source
+                }
+        except Exception as e:
+            logger.debug(f"Error checking paper trade status for {token_address[:8]}: {e}")
+            return None
+
     async def _track_ath_tick(self):
-        """Called every 30 seconds — polls price for all active signals and updates ATH/MAE."""
+        """Called every 30 seconds — polls price for all active signals concurrently (semaphore=3) and updates ATH/MAE."""
         if not _signal_tracking:
             return
 
-        for signal_id, tracking in list(_signal_tracking.items()):
-            mint = tracking["mint"]
-            entry_price = tracking["entry_price"]
+        sem = asyncio.Semaphore(3)
 
-            if entry_price <= 0:
-                continue
+        async def _check_one(signal_id: str, tracking: dict):
+            mint = tracking.get("mint")
+            entry_price = tracking.get("entry_price", 0.0)
+            if not mint or entry_price <= 0:
+                return
 
-            snap = await fetch_price(mint)
-            if not snap or snap.price_usd <= 0:
-                continue
+            async with sem:
+                try:
+                    snap = await fetch_price(mint)
+                    if not snap or snap.price_usd <= 0:
+                        return
 
-            current_price = snap.price_usd
+                    current_price = snap.price_usd
+                    if current_price > tracking.get("ath", entry_price):
+                        tracking["ath"] = current_price
 
-            # Update ATH
-            if current_price > tracking["ath"]:
-                tracking["ath"] = current_price
+                    drawdown_pct = ((current_price - entry_price) / entry_price) * 100.0
+                    if drawdown_pct < tracking.get("mae_pct", 0.0):
+                        tracking["mae_pct"] = drawdown_pct
+                except Exception as poll_err:
+                    logger.debug(f"ATH tick error for {mint[:8]}: {poll_err}")
 
-            # Update MAE (maximum adverse excursion = worst drawdown from entry)
-            drawdown_pct = ((current_price - entry_price) / entry_price) * 100.0
-            if drawdown_pct < tracking["mae_pct"]:
-                tracking["mae_pct"] = drawdown_pct
+        tasks = [
+            _check_one(s_id, tr)
+            for s_id, tr in list(_signal_tracking.items())
+        ]
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _resolve_window(self, signal_id: str, window_name: str):
         """Resolves a single outcome window for a signal."""
@@ -168,7 +225,23 @@ class OutcomeWorker:
         else:
             return_pct = 0.0
 
+        # CRITICAL FIX: Ensure ATH reflects current price if current price is higher than tracked ATH
+        if current_price > ath:
+            ath = current_price
+            tracking["ath"] = ath
+
         ath_return_pct = ((ath - entry_price) / entry_price) * 100.0 if entry_price > 0 else 0.0
+
+        # CRITICAL FIX: Ensure MAE reflects current price drawdown if worse than tracked MAE
+        if entry_price > 0 and current_price > 0:
+            cur_drawdown = ((current_price - entry_price) / entry_price) * 100.0
+            if cur_drawdown < mae_pct:
+                mae_pct = cur_drawdown
+                tracking["mae_pct"] = mae_pct
+        elif return_pct <= -70.0:
+            mae_pct = return_pct
+            tracking["mae_pct"] = mae_pct
+
         status = _classify_outcome(return_pct, current_liq)
 
         # Insert outcome record
@@ -203,6 +276,9 @@ class OutcomeWorker:
                 f"Return: {return_pct:+.1f}% | ATH: {ath_return_pct:+.1f}% | MAE: {abs(mae_pct):.1f}% | {status.upper()}"
             )
 
+            # Check paper trading execution correlation
+            paper_trade_info = await self._get_paper_trade_status(mint, signal_id)
+
             # Send Telegram outcome update for key windows (1h, 4h, 24h)
             if window_name in ("1h", "4h", "24h"):
                 await telegram_notifier.send_outcome_update(
@@ -212,7 +288,8 @@ class OutcomeWorker:
                     return_pct=return_pct,
                     ath_return_pct=ath_return_pct,
                     mae_pct=abs(mae_pct),
-                    status=status
+                    status=status,
+                    paper_trade_info=paper_trade_info,
                 )
 
         except Exception as e:
@@ -224,7 +301,7 @@ class OutcomeWorker:
             logger.info(f"🏁 Signal {signal_id[:8]} ({symbol}) fully resolved. Removed from active tracking.")
 
     async def _recover_pending_signals(self):
-        """On startup, recover unresolved signals and reschedule remaining windows."""
+        """On startup, recover unresolved signals and reschedule remaining windows with historical ATH preserved."""
         try:
             rows = await db_manager.query(
                 "paper_signals",
@@ -242,7 +319,7 @@ class OutcomeWorker:
                 signal_id = row.get("id")
                 mint = row.get("token_address", "")
                 symbol = row.get("symbol", "UNKNOWN")
-                entry_price = row.get("entry_price_usd", 0.0) or 0.0
+                entry_price = float(row.get("entry_price_usd", 0.0) or 0.0)
                 signal_at_str = row.get("signal_at", "")
 
                 if not signal_id or not signal_at_str:
@@ -253,10 +330,29 @@ class OutcomeWorker:
                 else:
                     signal_at = signal_at_str
 
-                # Register in tracker
+                # Recover best previous ATH and worst MAE from earlier resolved windows in DB
+                best_ath = entry_price
+                worst_mae = 0.0
+                try:
+                    outcomes = await db_manager.query(
+                        "signal_outcomes",
+                        filters={"signal_id": f"eq.{signal_id}"},
+                        limit=10
+                    )
+                    for oc in outcomes:
+                        oc_ath = float(oc.get("ath_since_signal", 0.0) or 0.0)
+                        if oc_ath > best_ath:
+                            best_ath = oc_ath
+                        oc_mae = float(oc.get("mae_pct", 0.0) or 0.0)
+                        if -abs(oc_mae) < worst_mae:
+                            worst_mae = -abs(oc_mae)
+                except Exception:
+                    pass
+
+                # Register in tracker with recovered ATH / MAE
                 _signal_tracking[signal_id] = {
-                    "ath": entry_price,
-                    "mae_pct": 0.0,
+                    "ath": best_ath,
+                    "mae_pct": worst_mae,
                     "entry_price": entry_price,
                     "mint": mint,
                     "symbol": symbol
@@ -286,7 +382,7 @@ class OutcomeWorker:
                 recovered += 1
 
             if recovered > 0:
-                logger.info(f"🔄 Recovered {recovered} pending signals from DB and rescheduled resolution windows.")
+                logger.info(f"🔄 Recovered {recovered} pending signals from DB (ATH history preserved) and rescheduled resolution windows.")
 
         except Exception as e:
             logger.error(f"Error recovering pending signals: {e}")

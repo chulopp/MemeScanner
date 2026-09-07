@@ -258,9 +258,10 @@ class TelegramNotifier:
         return_pct: float,
         ath_return_pct: float,
         mae_pct: float,
-        status: str
+        status: str,
+        paper_trade_info: Optional[dict] = None,
     ) -> Optional[int]:
-        """Sends a compact outcome resolution update for a specific window."""
+        """Sends a compact outcome resolution update for a specific window with paper trade correlation."""
         if not self._enabled:
             return None
 
@@ -271,6 +272,31 @@ class TelegramNotifier:
         import html as _html
         status_emoji = {"runner": "🚀", "dead": "💀", "neutral": "⟶"}.get(status, "❓")
 
+        trade_line = ""
+        if paper_trade_info:
+            pt_status = paper_trade_info.get("status")
+            score = paper_trade_info.get("score", 0.0)
+            source = paper_trade_info.get("source", "PINTU_A")
+            if pt_status == "OPEN":
+                trade_line = f"\n\n🤖 <b>Paper Trade:</b> ✅ Followed ({source} | Score: {score:.1f})\n• Status: 🟢 <b>Posisi Terbuka (Floating)</b>"
+            elif pt_status == "CLOSED":
+                reason = paper_trade_info.get("exit_reason", "")
+                ret = paper_trade_info.get("return_pct", 0.0)
+                reason_str = {
+                    "SL": f"🛑 Stop Loss ({ret:+.1f}%)",
+                    "TP1": f"🎯 TP1 Hit ({ret:+.1f}%)",
+                    "TP2": f"🎯 TP2 Hit ({ret:+.1f}%)",
+                    "TP3": f"🎯 TP3 Hit ({ret:+.1f}%)",
+                    "TRAILING": f"🌙 Trailing Stop ({ret:+.1f}%)"
+                }.get(reason, f"Ditutup ({reason})")
+                trade_line = f"\n\n🤖 <b>Paper Trade:</b> ✅ Followed ({source} | Score: {score:.1f})\n• Hasil: <b>{reason_str}</b>"
+            elif pt_status == "SKIPPED":
+                reason = paper_trade_info.get("reason", "")
+                reason_str = "Kapasitas Penuh (10/10)" if "CAPACITY" in reason else ("Duplikat" if "DUPLICATE" in reason else reason)
+                trade_line = f"\n\n🤖 <b>Paper Trade:</b> ⏸ <b>Dilewati</b> ({reason_str})\n• Signal Score: {score:.1f}"
+        else:
+            trade_line = "\n\n🤖 <b>Paper Trade:</b> ⚪ Sinyal saja (tidak dieksekusi)"
+
         text = (
             f"📋 <b>Outcome [{time_window}]</b>: ${_html.escape(symbol)}\n"
             f"<code>{token_address}</code>\n"
@@ -279,6 +305,7 @@ class TelegramNotifier:
             f"🏔 ATH: <b>{ath_return_pct:+.1f}%</b>\n"
             f"📉 Max Drawdown: <b>{mae_pct:.1f}%</b>\n"
             f"{status_emoji} Status: <b>{status.upper()}</b>"
+            f"{trade_line}"
         )
 
         try:
@@ -347,6 +374,8 @@ class TelegramNotifier:
         exit_price: float = 0.0,
         entry_mcap: float = 0.0,
         exit_mcap: float = 0.0,
+        opportunity_score: float = 0.0,
+        signal_source: str = "",
     ) -> None:
         """Notif saat TP1/TP2/TP3 triggered (partial sell)."""
         if not self._enabled:
@@ -366,8 +395,10 @@ class TelegramNotifier:
             p_str = f"${exit_price:.8f}" if exit_price < 0.01 else f"${exit_price:.6f}"
             price_info = f"\n💰 Exit Price: <b>{p_str}</b>"
 
+        sig_info = f" ({signal_source} | Score: {opportunity_score:.1f})" if opportunity_score > 0 else ""
+
         text = (
-            f"{tier_emoji} <b>{tier} Hit (+{return_pct:.0f}%)</b>: ${_html.escape(symbol)}\n"
+            f"{tier_emoji} <b>{tier} Hit (+{return_pct:.0f}%)</b>: ${_html.escape(symbol)}{sig_info}\n"
             f"<code>{token_address}</code>\n"
             f"{price_info}{mcap_growth}\n"
             f"📈 Return saat ini: <b>{return_pct:+.1f}%</b>\n"
@@ -392,6 +423,8 @@ class TelegramNotifier:
         exit_price: float = 0.0,
         entry_mcap: float = 0.0,
         exit_mcap: float = 0.0,
+        opportunity_score: float = 0.0,
+        signal_source: str = "",
     ) -> None:
         """Notif saat hard stop loss triggered."""
         if not self._enabled:
@@ -411,8 +444,10 @@ class TelegramNotifier:
             p_exit = f"${exit_price:.8f}" if exit_price < 0.01 else f"${exit_price:.6f}"
             price_trajectory = f"\n💰 Entry: <b>{p_entry}</b> ➔ Exit: <b>{p_exit}</b>"
 
+        sig_info = f" ({signal_source} | Score: {opportunity_score:.1f})" if opportunity_score > 0 else ""
+
         text = (
-            f"🛑 <b>Stop Loss</b>: ${_html.escape(symbol)}\n"
+            f"🛑 <b>Stop Loss</b>: ${_html.escape(symbol)}{sig_info}\n"
             f"<code>{token_address}</code>\n"
             f"{price_trajectory}{mcap_trajectory}\n"
             f"📉 Return: <b>{return_pct:+.1f}%</b>\n"
@@ -437,6 +472,8 @@ class TelegramNotifier:
         exit_price: float = 0.0,
         entry_mcap: float = 0.0,
         exit_mcap: float = 0.0,
+        opportunity_score: float = 0.0,
+        signal_source: str = "",
     ) -> None:
         """Notif saat moonbag trailing stop triggered."""
         if not self._enabled:
@@ -451,8 +488,10 @@ class TelegramNotifier:
         if entry_mcap > 0 and exit_mcap > 0:
             mcap_growth = f"\n🧢 MC Growth: <b>{format_mcap(entry_mcap)} ➔ {format_mcap(exit_mcap)}</b>"
 
+        sig_info = f" ({signal_source} | Score: {opportunity_score:.1f})" if opportunity_score > 0 else ""
+
         text = (
-            f"🌙 <b>Trailing Stop (Moonbag)</b>: ${_html.escape(symbol)}\n"
+            f"🌙 <b>Trailing Stop (Moonbag)</b>: ${_html.escape(symbol)}{sig_info}\n"
             f"<code>{token_address}</code>\n"
             f"{mcap_growth}\n"
             f"🏔 MFE (puncak tertinggi): <b>{mfe_pct:+.1f}%</b>\n"
@@ -610,17 +649,11 @@ class TelegramNotifier:
     async def _cmd_pnl(self, chat_id: int) -> None:
         try:
             from src.paper_trading.position_tracker import position_tracker
-            from src.database.client import db_manager
             from datetime import datetime, timezone
             import html as _html
 
             summary = await position_tracker.get_portfolio_summary()
-            all_trades = await db_manager.query("paper_trade_positions", limit=5000)
-            closed = [
-                t for t in all_trades
-                if t.get("exit_reason") not in ("OPEN", None, "CORRUPTED_RESET")
-                and not t.get("skipped_reason")
-            ]
+            closed = summary.get("closed_trades", [])
 
             now_utc = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 

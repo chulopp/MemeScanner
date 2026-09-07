@@ -82,6 +82,11 @@ class ActivePosition:
     opportunity_score: float = 0.0
     entry_market_cap_usd: float = 0.0
 
+    # In-memory latest cached price (updated by _poll_loop for instant UI/PnL responses)
+    latest_price_usd: float = 0.0
+    latest_mcap_usd: float = 0.0
+    last_price_updated_at: Optional[datetime] = None
+
 
 class PositionTracker:
     """
@@ -234,6 +239,9 @@ class PositionTracker:
                 bonding_curve_address=bc_addr,
                 opportunity_score=opportunity_score,
                 entry_market_cap_usd=entry_mcap,
+                latest_price_usd=entry_price,
+                latest_mcap_usd=entry_mcap,
+                last_price_updated_at=now_utc,
             )
             self._active[position_id] = pos
 
@@ -248,7 +256,7 @@ class PositionTracker:
 
     async def get_portfolio_summary(self) -> dict:
         """
-        Computes real-time portfolio accounting:
+        Computes real-time portfolio accounting instantly from in-memory cache:
         - Starting Capital ($100.0)
         - Realized PnL ($) from all closed trades (excluding CORRUPTED_RESET)
         - Allocated Capital ($) across currently open positions
@@ -262,8 +270,9 @@ class PositionTracker:
         if not db_manager._connected:
             db_manager.connect()
 
-        # Always sync with DB open positions
-        await self._recover_open_positions()
+        # Only sync with DB if active list in memory is empty
+        if not self._active:
+            await self._recover_open_positions()
 
         all_trades = await db_manager.query("paper_trade_positions", limit=5000)
         closed = [
@@ -282,14 +291,13 @@ class PositionTracker:
         allocated_usd = len(active_list) * POSITION_SIZE
         available_cash = STARTING_CAPITAL + realized_pnl_usd - allocated_usd
 
-        # Compute live floating PnL for active positions
+        # Compute instant live floating PnL using background-cached prices
         open_details = []
         total_floating_usd = 0.0
 
         for pos in active_list:
-            snap = await fetch_price(pos.token_address, pos.bonding_curve_address)
-            cur_price = snap.price_usd if snap else pos.entry_price_usd
-            cur_mcap = snap.market_cap_usd if (snap and snap.market_cap_usd > 0) else (
+            cur_price = pos.latest_price_usd if pos.latest_price_usd > 0 else pos.entry_price_usd
+            cur_mcap = pos.latest_mcap_usd if pos.latest_mcap_usd > 0 else (
                 cur_price * 1_000_000_000 if pos.token_address.endswith("pump") else 0.0
             )
             entry_mcap = pos.entry_market_cap_usd or (
@@ -333,6 +341,7 @@ class PositionTracker:
             "portfolio_roi_pct": portfolio_roi_pct,
             "open_positions": open_details,
             "closed_trades_count": len(closed),
+            "closed_trades": closed,
         }
 
     # ──────────────────────────────────────────
@@ -396,6 +405,13 @@ class PositionTracker:
             entry = pos.entry_price_usd
             if entry <= 0:
                 return
+
+            # Update cached prices for instant reporting
+            pos.latest_price_usd = current_price
+            pos.latest_mcap_usd = snap.market_cap_usd if snap.market_cap_usd > 0 else (
+                current_price * 1_000_000_000 if pos.token_address.endswith("pump") else 0.0
+            )
+            pos.last_price_updated_at = datetime.now(tz=timezone.utc)
 
             return_pct = ((current_price - entry) / entry) * 100.0
             logger.debug(
@@ -615,6 +631,9 @@ class PositionTracker:
                     remaining_fraction=1.0,
                     opportunity_score=float(row.get("opportunity_score_at_entry", 0.0) or 0.0),
                     entry_market_cap_usd=pos_entry_price * 1_000_000_000 if pos_token_addr.endswith("pump") else 0.0,
+                    latest_price_usd=pos_entry_price,
+                    latest_mcap_usd=pos_entry_price * 1_000_000_000 if pos_token_addr.endswith("pump") else 0.0,
+                    last_price_updated_at=entry_time,
                 )
                 self._active[pos_id] = pos
                 recovered += 1
@@ -662,6 +681,8 @@ class PositionTracker:
                 exit_price=exit_price,
                 entry_mcap=pos.entry_market_cap_usd,
                 exit_mcap=exit_mcap,
+                opportunity_score=pos.opportunity_score,
+                signal_source=pos.signal_source,
             )
         except Exception as e:
             logger.debug(f"[PositionTracker] notify_tp failed: {e}")
@@ -687,6 +708,8 @@ class PositionTracker:
                     exit_price=exit_price,
                     entry_mcap=pos.entry_market_cap_usd,
                     exit_mcap=exit_mcap,
+                    opportunity_score=pos.opportunity_score,
+                    signal_source=pos.signal_source,
                 )
             elif reason == "TRAILING":
                 await telegram_notifier.send_trailing_stop_hit(
@@ -698,6 +721,8 @@ class PositionTracker:
                     exit_price=exit_price,
                     entry_mcap=pos.entry_market_cap_usd,
                     exit_mcap=exit_mcap,
+                    opportunity_score=pos.opportunity_score,
+                    signal_source=pos.signal_source,
                 )
         except Exception as e:
             logger.debug(f"[PositionTracker] notify_closed failed: {e}")

@@ -219,6 +219,11 @@ class PositionTracker:
                 "exit_reason": "OPEN",
                 "parameter_version": FROZEN_PARAMS["parameter_version"],
                 "skipped_reason": None,
+                # TP milestone state — persisted for crash recovery
+                "tp1_hit": False,
+                "tp2_hit": False,
+                "tp3_hit": False,
+                "remaining_fraction": 1.0,
             }
 
             try:
@@ -447,7 +452,9 @@ class PositionTracker:
                 sell_fraction = FROZEN_PARAMS["tp1_sell_fraction"]
                 pos.remaining_fraction -= sell_fraction
                 logger.info(f"🎯 [TP1] ${pos.symbol} hit +100% — selling {sell_fraction*100:.0f}%")
-                asyncio.create_task(self._notify_tp_hit(pos, "TP1", return_pct, sell_fraction))
+                # Persist TP state immediately to survive restarts
+                asyncio.create_task(self._persist_tp_state(pos))
+                asyncio.create_task(self._notify_tp_hit(pos, "TP1", return_pct, sell_fraction, current_price))
 
             # ── TP2: +300% ──
             if pos.tp1_hit and not pos.tp2_hit and return_pct >= FROZEN_PARAMS["tp2_pct"]:
@@ -455,7 +462,8 @@ class PositionTracker:
                 sell_fraction = FROZEN_PARAMS["tp2_sell_fraction"]
                 pos.remaining_fraction -= sell_fraction
                 logger.info(f"🎯 [TP2] ${pos.symbol} hit +300% — selling {sell_fraction*100:.0f}%")
-                asyncio.create_task(self._notify_tp_hit(pos, "TP2", return_pct, sell_fraction))
+                asyncio.create_task(self._persist_tp_state(pos))
+                asyncio.create_task(self._notify_tp_hit(pos, "TP2", return_pct, sell_fraction, current_price))
 
             # ── TP3: +500% ──
             if pos.tp2_hit and not pos.tp3_hit and return_pct >= FROZEN_PARAMS["tp3_pct"]:
@@ -463,7 +471,8 @@ class PositionTracker:
                 sell_fraction = FROZEN_PARAMS["tp3_sell_fraction"]
                 pos.remaining_fraction -= sell_fraction
                 logger.info(f"🎯 [TP3] ${pos.symbol} hit +500% — selling {sell_fraction*100:.0f}%")
-                asyncio.create_task(self._notify_tp_hit(pos, "TP3", return_pct, sell_fraction))
+                asyncio.create_task(self._persist_tp_state(pos))
+                asyncio.create_task(self._notify_tp_hit(pos, "TP3", return_pct, sell_fraction, current_price))
                 # After TP3, remaining 20% becomes moonbag — we continue tracking
 
                 # Record TP3 event (partial close of TP1+TP2+TP3 = 80% of position)
@@ -559,6 +568,29 @@ class PositionTracker:
         except Exception as e:
             logger.debug(f"[PositionTracker] MFE DB update failed for {position_id[:8]}: {e}")
 
+    async def _persist_tp_state(self, pos: "ActivePosition") -> None:
+        """Persist current TP milestone state to DB immediately after a TP hit.
+        Prevents double-execution of TP hits after bot restart (Fix #3)."""
+        try:
+            await db_manager.update(
+                "paper_trade_positions",
+                {
+                    "tp1_hit": pos.tp1_hit,
+                    "tp2_hit": pos.tp2_hit,
+                    "tp3_hit": pos.tp3_hit,
+                    "remaining_fraction": round(pos.remaining_fraction, 4),
+                    "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+                },
+                filters={"id": f"eq.{pos.position_id}"}
+            )
+            logger.debug(
+                f"[PositionTracker] TP state persisted for {pos.symbol}: "
+                f"TP1={pos.tp1_hit}, TP2={pos.tp2_hit}, TP3={pos.tp3_hit}, "
+                f"remaining={pos.remaining_fraction:.2f}"
+            )
+        except Exception as e:
+            logger.warning(f"[PositionTracker] TP state persist failed for {pos.position_id[:8]}: {e}")
+
     async def _record_skipped(
         self,
         position_id: str,
@@ -626,6 +658,22 @@ class PositionTracker:
 
                 pos_entry_price = row.get("entry_price_usd", 0.0) or 0.0
                 pos_token_addr = row.get("token_address", "")
+
+                # ── Recover persisted TP milestone state (Fix #3) ──
+                # Restores tp1_hit/tp2_hit/tp3_hit and remaining_fraction from DB
+                # so bot does NOT re-trigger TPs that already fired before restart.
+                recovered_tp1 = bool(row.get("tp1_hit", False))
+                recovered_tp2 = bool(row.get("tp2_hit", False))
+                recovered_tp3 = bool(row.get("tp3_hit", False))
+                recovered_fraction = float(row.get("remaining_fraction", 1.0) or 1.0)
+
+                if recovered_tp1 or recovered_tp2 or recovered_tp3:
+                    logger.info(
+                        f"🔄 [PositionTracker] Recovered TP state for {row.get('symbol', 'UNKNOWN')}: "
+                        f"TP1={recovered_tp1}, TP2={recovered_tp2}, TP3={recovered_tp3}, "
+                        f"remaining_fraction={recovered_fraction:.2f}"
+                    )
+
                 pos = ActivePosition(
                     position_id=pos_id,
                     token_address=pos_token_addr,
@@ -635,11 +683,11 @@ class PositionTracker:
                     entry_time=entry_time,
                     position_size_usd=row.get("position_size_usd", 2.0) or 2.0,
                     price_high_ever_seen=row.get("price_high_ever_seen", 0.0) or 0.0,
-                    # TP milestone state can't be exactly recovered; conservative approach:
-                    tp1_hit=False,
-                    tp2_hit=False,
-                    tp3_hit=False,
-                    remaining_fraction=1.0,
+                    # Restored from DB — prevents double-execution after restart
+                    tp1_hit=recovered_tp1,
+                    tp2_hit=recovered_tp2,
+                    tp3_hit=recovered_tp3,
+                    remaining_fraction=recovered_fraction,
                     opportunity_score=float(row.get("opportunity_score_at_entry", 0.0) or 0.0),
                     entry_market_cap_usd=pos_entry_price * 1_000_000_000 if pos_token_addr.endswith("pump") else 0.0,
                     latest_price_usd=pos_entry_price,
@@ -675,11 +723,15 @@ class PositionTracker:
             logger.debug(f"[PositionTracker] notify_opened failed: {e}")
 
     async def _notify_tp_hit(
-        self, pos: ActivePosition, tier: str, return_pct: float, sell_fraction: float
+        self, pos: ActivePosition, tier: str, return_pct: float, sell_fraction: float,
+        current_price: Optional[float] = None
     ) -> None:
         try:
             from src.paper_trading.telegram_notifier import telegram_notifier
-            exit_price = pos.entry_price_usd * (1.0 + return_pct / 100.0)
+            # Use actual current_price if provided (more accurate than back-calculating from pct)
+            exit_price = current_price if current_price and current_price > 0 else (
+                pos.entry_price_usd * (1.0 + return_pct / 100.0)
+            )
             exit_mcap = exit_price * 1_000_000_000 if pos.token_address.endswith("pump") else 0.0
             await telegram_notifier.send_tp_hit(
                 symbol=pos.symbol,

@@ -302,14 +302,17 @@ class TelegramNotifier:
                 ret = paper_trade_info.get("return_pct", 0.0)
                 exit_mc = paper_trade_info.get("exit_mcap", 0.0)
                 exit_mc_str = f" | Exit MC: <b>{format_mcap(exit_mc)}</b>" if exit_mc > 0 else ""
+                pos_size = float(paper_trade_info.get("position_size", 2.0) or 2.0)
+                pnl_u = pos_size * (ret / 100.0)
+                pnl_u_str = f"{'+' if pnl_u >= 0 else '-'}${abs(pnl_u):.2f}"
                 reason_str = {
-                    "SL": f"🛑 Stop Loss ({ret:+.1f}%)",
-                    "TP1": f"🎯 TP1 Hit ({ret:+.1f}%)",
-                    "TP2": f"🎯 TP2 Hit ({ret:+.1f}%)",
-                    "TP3": f"🎯 TP3 Hit ({ret:+.1f}%)",
-                    "TRAILING": f"🌙 Trailing Stop ({ret:+.1f}%)",
-                    "TIMEOUT_4H": f"⌛ Timeout 4H ({ret:+.1f}%)"
-                }.get(reason, f"Ditutup ({reason})")
+                    "SL": f"🛑 Stop Loss ({pnl_u_str} / {ret:+.1f}%)",
+                    "TP1": f"🎯 TP1 Hit ({pnl_u_str} / {ret:+.1f}%)",
+                    "TP2": f"🎯 TP2 Hit ({pnl_u_str} / {ret:+.1f}%)",
+                    "TP3": f"🎯 TP3 Hit ({pnl_u_str} / {ret:+.1f}%)",
+                    "TRAILING": f"🌙 Trailing Stop ({pnl_u_str} / {ret:+.1f}%)",
+                    "TIMEOUT_4H": f"⌛ Timeout 4H ({pnl_u_str} / {ret:+.1f}%)"
+                }.get(reason, f"Ditutup ({reason}) ({pnl_u_str} / {ret:+.1f}%)")
                 trade_line = f"\n\n🤖 <b>Paper Trade:</b> ✅ Followed ({source} | Score: {score:.1f})\n• Hasil: <b>{reason_str}</b>{exit_mc_str}"
             elif pt_status == "SKIPPED":
                 reason = paper_trade_info.get("reason", "")
@@ -914,11 +917,15 @@ class TelegramNotifier:
                 entry_p = float(t.get("entry_price_usd") or 0.0)
                 exit_p = float(t.get("exit_price_usd") or 0.0)
                 score = float(t.get("opportunity_score_at_entry") or 0.0)
+                pos_size = float(t.get("position_size_usd", 2.0) or 2.0)
+                pnl_usd = pos_size * (ret / 100.0)
+                pnl_sign = "+" if pnl_usd >= 0 else "-"
+                pnl_str = f"{pnl_sign}${abs(pnl_usd):.2f}"
 
                 # Emojis
                 ret_emoji = "🟢" if ret > 0 else "🔴"
                 reason_emoji = {
-                    "SL": "🛑", "TP1": "✅", "TP2": "📚", "TP3": "💎", "TRAILING": "🌙"
+                    "SL": "🛑", "TP1": "✅", "TP2": "📚", "TP3": "💎", "TRAILING": "🌙", "TIMEOUT_4H": "⌛"
                 }.get(reason, "📋")
 
                 entry_str = f"${entry_p:.8f}" if entry_p < 0.01 else f"${entry_p:.6f}"
@@ -931,7 +938,7 @@ class TelegramNotifier:
 
                 block = (
                     f"{i}. {ret_emoji} <b>${sym}</b> [{src}]\n"
-                    f"   {reason_emoji} Exit: <b>{ret:+.1f}%</b> via {reason}\n"
+                    f"   {reason_emoji} Exit: <b>{pnl_str} ({ret:+.1f}%)</b> via {reason}\n"
                     f"   ⏱ Hold: <b>{hold:.0f}m</b> | Score: <b>{score:.0f}</b>\n"
                     f"   💰 Entry: {entry_str}{e_mc_str} → Exit: {exit_str}{x_mc_str}\n"
                     f"   <code>{addr}</code>"
@@ -939,9 +946,16 @@ class TelegramNotifier:
                 trade_blocks.append(block)
 
             # Chunk messages cleanly if needed to avoid exceeding Telegram's 4096 character limit
+            total_selected_pnl = sum(
+                float(t.get("position_size_usd", 2.0) or 2.0) * (float(t.get("realized_return_pct") or 0.0) / 100.0)
+                for t in selected
+            )
+            tot_sign = "+" if total_selected_pnl >= 0 else "-"
+            tot_pnl_str = f"{tot_sign}${abs(total_selected_pnl):.2f}"
+
             header = (
                 f"📜 <b>RIWAYAT TRADE — {limit} TERAKHIR</b>\n"
-                f"<i>(Total closed: {len(closed)})</i>\n"
+                f"<i>(Total closed: {len(closed)} | PnL batch ini: <b>{tot_pnl_str}</b>)</i>\n"
                 f"{'─' * 28}\n"
             )
 

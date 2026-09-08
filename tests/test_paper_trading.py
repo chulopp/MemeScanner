@@ -17,16 +17,23 @@ from src.paper_trading.outcome_worker import _classify_outcome
 
 @pytest.mark.asyncio
 async def test_price_fetcher_dexscreener_tier1():
-    """Tier 1 DexScreener should return PriceSnapshot when API responds."""
+    """Tier 1 DexScreener should return PriceSnapshot when API responds with a valid dexId."""
+    import src.paper_trading.price_fetcher as pf_module
     from src.paper_trading.price_fetcher import _fetch_dexscreener
+
+    # Reset any rate limit state that may have been set by a prior test
+    pf_module._dex_rate_limited_until = 0.0
 
     mock_response = MagicMock()
     mock_response.status_code = 200
     mock_response.json.return_value = {
         "pairs": [{
+            "dexId": "pumpfun",
+            "quoteToken": {"symbol": "SOL"},
             "priceUsd": "0.0001234",
             "liquidity": {"usd": 15000},
-            "volume": {"h24": 50000}
+            "volume": {"h24": 50000},
+            "fdv": 123400.0
         }]
     }
 
@@ -111,12 +118,15 @@ async def test_signal_recorder_records_to_db():
     mock_price = PriceSnapshot(price_usd=0.0001, liquidity_usd=10_000, volume_24h_usd=5000, source="dexscreener")
 
     with patch("src.paper_trading.signal_recorder.fetch_price", AsyncMock(return_value=mock_price)):
-        with patch("src.paper_trading.signal_recorder.db_manager.insert", AsyncMock(return_value=[{"id": "test-uuid-123"}])):
+        with patch("src.paper_trading.signal_recorder.db_manager.insert", AsyncMock(return_value=True)):
             with patch("src.paper_trading.signal_recorder.telegram_notifier.send_signal_notification", AsyncMock(return_value=99)):
                 with patch("src.paper_trading.signal_recorder.db_manager.update", AsyncMock()):
                     signal_id = await record_signal(event, safety)
 
-    assert signal_id == "test-uuid-123"
+    # signal_id is generated internally as a UUID4 — verify it's a valid non-empty string
+    assert signal_id is not None
+    assert len(signal_id) == 36  # UUID4 format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    assert signal_id.count("-") == 4
 
 
 def test_extract_filter_tags():

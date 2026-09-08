@@ -22,6 +22,15 @@ DEXSCREENER_TOKEN_URL = "https://api.dexscreener.com/latest/dex/tokens/{mint}"
 ALLOWED_DEX_IDS = {"pumpfun", "pumpswap", "raydium", "meteora", "orca", "whirlpool"}
 ALLOWED_QUOTE_SYMBOLS = {"SOL", "WSOL", "USDC", "USDT"}
 
+# DexScreener rate limit state — when 429 is received, cool down for 30s
+import time as _time
+_dex_rate_limited_until: float = 0.0
+DEX_RATE_LIMIT_COOLDOWN = 30.0  # seconds to wait after 429
+
+# Last-known-good DexScreener cache — serves stale data during rate limit window
+# Format: {mint: PriceSnapshot}
+_dex_last_good: dict[str, "PriceSnapshot"] = {}
+
 
 def format_mcap(mcap: float) -> str:
     """Format market cap into readable string, e.g. $43.2K or $1.25M."""
@@ -45,10 +54,48 @@ class PriceSnapshot:
     market_cap_usd: float = 0.0
 
 
-async def _fetch_dexscreener(client: httpx.AsyncClient, mint: str) -> Optional[PriceSnapshot]:
-    """Tier 1: DexScreener public API with strict DEX whitelist and sanity checks."""
+async def _fetch_dexscreener(client: httpx.AsyncClient, mint: str) -> Optional["PriceSnapshot"]:
+    """Tier 1: DexScreener public API with strict DEX whitelist and sanity checks.
+    Handles 429 rate limits with 30s cooldown; serves last-known-good cache during cooldown."""
+    global _dex_rate_limited_until
+
+    # Check if we're in a rate limit cooldown window
+    now = _time.time()
+    if now < _dex_rate_limited_until:
+        remaining = _dex_rate_limited_until - now
+        logger.debug(f"DexScreener rate limit cooldown active ({remaining:.0f}s remaining) for {mint[:8]}")
+        # Return last-known-good price if available during cooldown
+        cached = _dex_last_good.get(mint)
+        if cached:
+            logger.debug(f"Serving stale DexScreener cache for {mint[:8]} (source: dexscreener_cached)")
+            return PriceSnapshot(
+                price_usd=cached.price_usd,
+                liquidity_usd=cached.liquidity_usd,
+                volume_24h_usd=cached.volume_24h_usd,
+                source="dexscreener_cached",
+                market_cap_usd=cached.market_cap_usd,
+            )
+        return None
+
     try:
         resp = await client.get(DEXSCREENER_TOKEN_URL.format(mint=mint), timeout=8.0)
+        if resp.status_code == 429:
+            _dex_rate_limited_until = _time.time() + DEX_RATE_LIMIT_COOLDOWN
+            logger.warning(
+                f"⚠️ DexScreener 429 rate limit hit for {mint[:8]}. "
+                f"Cooling down for {DEX_RATE_LIMIT_COOLDOWN:.0f}s."
+            )
+            # Serve last-known-good if available
+            cached = _dex_last_good.get(mint)
+            if cached:
+                return PriceSnapshot(
+                    price_usd=cached.price_usd,
+                    liquidity_usd=cached.liquidity_usd,
+                    volume_24h_usd=cached.volume_24h_usd,
+                    source="dexscreener_cached",
+                    market_cap_usd=cached.market_cap_usd,
+                )
+            return None
         if resp.status_code != 200:
             return None
         data = resp.json()
@@ -114,13 +161,16 @@ async def _fetch_dexscreener(client: httpx.AsyncClient, mint: str) -> Optional[P
             fdv = price * 1_000_000_000
 
         if price > 0:
-            return PriceSnapshot(
+            result = PriceSnapshot(
                 price_usd=price,
                 liquidity_usd=liq,
                 volume_24h_usd=vol,
                 source="dexscreener",
                 market_cap_usd=fdv,
             )
+            # Cache the good result for rate limit recovery
+            _dex_last_good[mint] = result
+            return result
         return None
     except Exception as e:
         logger.debug(f"DexScreener price fetch error for {mint[:8]}: {e}")

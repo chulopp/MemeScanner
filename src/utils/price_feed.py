@@ -10,7 +10,7 @@ SOL_MINT = "So11111111111111111111111111111111111111112"
 class PriceFeedClient:
     """Async price feed client with in-memory caching and fallback."""
 
-    def __init__(self, cache_ttl_seconds: int = 300, default_sol_usd: float = 180.0):
+    def __init__(self, cache_ttl_seconds: int = 30, default_sol_usd: float = 180.0):
         self._cached_sol_usd: float = default_sol_usd
         self._last_fetched_ts: float = 0.0
         self._cache_ttl = cache_ttl_seconds

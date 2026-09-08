@@ -260,8 +260,14 @@ class TelegramNotifier:
         mae_pct: float,
         status: str,
         paper_trade_info: Optional[dict] = None,
+        entry_price: float = 0.0,
+        current_price: float = 0.0,
+        ath_price: float = 0.0,
+        entry_mcap: float = 0.0,
+        current_mcap: float = 0.0,
+        ath_mcap: float = 0.0,
     ) -> Optional[int]:
-        """Sends a compact outcome resolution update for a specific window with paper trade correlation."""
+        """Sends a compact outcome resolution update for a specific window with paper trade correlation and Market Caps."""
         if not self._enabled:
             return None
 
@@ -271,6 +277,18 @@ class TelegramNotifier:
 
         import html as _html
         status_emoji = {"runner": "🚀", "dead": "💀", "neutral": "⟶"}.get(status, "❓")
+
+        price_line = ""
+        if entry_price > 0 and current_price > 0:
+            p_e = f"${entry_price:.8f}" if entry_price < 0.01 else f"${entry_price:.6f}"
+            p_c = f"${current_price:.8f}" if current_price < 0.01 else f"${current_price:.6f}"
+            mc_e = f" (MC: <b>{format_mcap(entry_mcap)}</b>)" if entry_mcap > 0 else ""
+            mc_c = f" (MC: <b>{format_mcap(current_mcap)}</b>)" if current_mcap > 0 else ""
+            price_line = f"💰 Entry: <b>{p_e}</b>{mc_e} ➔ Now: <b>{p_c}</b>{mc_c}\n"
+
+        ath_line = ""
+        mc_ath = f" (MC: <b>{format_mcap(ath_mcap)}</b>)" if ath_mcap > 0 else ""
+        ath_line = f"🏔 ATH: <b>{ath_return_pct:+.1f}%</b>{mc_ath} | 📉 Max DD: <b>{mae_pct:.1f}%</b>\n"
 
         trade_line = ""
         if paper_trade_info:
@@ -282,6 +300,8 @@ class TelegramNotifier:
             elif pt_status == "CLOSED":
                 reason = paper_trade_info.get("exit_reason", "")
                 ret = paper_trade_info.get("return_pct", 0.0)
+                exit_mc = paper_trade_info.get("exit_mcap", 0.0)
+                exit_mc_str = f" | Exit MC: <b>{format_mcap(exit_mc)}</b>" if exit_mc > 0 else ""
                 reason_str = {
                     "SL": f"🛑 Stop Loss ({ret:+.1f}%)",
                     "TP1": f"🎯 TP1 Hit ({ret:+.1f}%)",
@@ -290,7 +310,7 @@ class TelegramNotifier:
                     "TRAILING": f"🌙 Trailing Stop ({ret:+.1f}%)",
                     "TIMEOUT_4H": f"⌛ Timeout 4H ({ret:+.1f}%)"
                 }.get(reason, f"Ditutup ({reason})")
-                trade_line = f"\n\n🤖 <b>Paper Trade:</b> ✅ Followed ({source} | Score: {score:.1f})\n• Hasil: <b>{reason_str}</b>"
+                trade_line = f"\n\n🤖 <b>Paper Trade:</b> ✅ Followed ({source} | Score: {score:.1f})\n• Hasil: <b>{reason_str}</b>{exit_mc_str}"
             elif pt_status == "SKIPPED":
                 reason = paper_trade_info.get("reason", "")
                 reason_str = "Kapasitas Penuh (10/10)" if "CAPACITY" in reason else ("Duplikat" if "DUPLICATE" in reason else reason)
@@ -302,10 +322,9 @@ class TelegramNotifier:
             f"📋 <b>Outcome [{time_window}]</b>: ${_html.escape(symbol)}\n"
             f"<code>{token_address}</code>\n"
             f"\n"
-            f"📈 Return: <b>{return_pct:+.1f}%</b>\n"
-            f"🏔 ATH: <b>{ath_return_pct:+.1f}%</b>\n"
-            f"📉 Max Drawdown: <b>{mae_pct:.1f}%</b>\n"
-            f"{status_emoji} Status: <b>{status.upper()}</b>"
+            f"{price_line}"
+            f"{ath_line}"
+            f"📈 Return: <b>{return_pct:+.1f}%</b> | {status_emoji} <b>{status.upper()}</b>"
             f"{trade_line}"
         )
 
@@ -387,21 +406,25 @@ class TelegramNotifier:
 
         import html as _html
         tier_emoji = {"TP1": "✅", "TP2": "📚", "TP3": "💎"}.get(tier, "🎯")
-        mcap_growth = ""
+        mcap_trajectory = ""
         if entry_mcap > 0 and exit_mcap > 0:
-            mcap_growth = f"\n🧢 MC Growth: <b>{format_mcap(entry_mcap)} ➔ {format_mcap(exit_mcap)}</b>"
+            mcap_trajectory = f"\n🧢 MC: <b>{format_mcap(entry_mcap)} ➔ {format_mcap(exit_mcap)}</b>"
 
-        price_info = ""
-        if exit_price > 0:
+        price_trajectory = ""
+        if entry_price > 0 and exit_price > 0:
+            p_e = f"${entry_price:.8f}" if entry_price < 0.01 else f"${entry_price:.6f}"
+            p_x = f"${exit_price:.8f}" if exit_price < 0.01 else f"${exit_price:.6f}"
+            price_trajectory = f"\n💰 Entry: <b>{p_e}</b> ➔ Exit: <b>{p_x}</b>"
+        elif exit_price > 0:
             p_str = f"${exit_price:.8f}" if exit_price < 0.01 else f"${exit_price:.6f}"
-            price_info = f"\n💰 Exit Price: <b>{p_str}</b>"
+            price_trajectory = f"\n💰 Exit Price: <b>{p_str}</b>"
 
         sig_info = f" ({signal_source} | Score: {opportunity_score:.1f})" if opportunity_score > 0 else ""
 
         text = (
             f"{tier_emoji} <b>{tier} Hit (+{return_pct:.0f}%)</b>: ${_html.escape(symbol)}{sig_info}\n"
             f"<code>{token_address}</code>\n"
-            f"{price_info}{mcap_growth}\n"
+            f"{price_trajectory}{mcap_trajectory}\n"
             f"📈 Return saat ini: <b>{return_pct:+.1f}%</b>\n"
             f"💰 Dijual: <b>{sell_fraction*100:.0f}% posisi</b>\n"
             f"🔒 Sisa di-hold: <b>{remaining_fraction*100:.0f}%</b>"
@@ -901,11 +924,16 @@ class TelegramNotifier:
                 entry_str = f"${entry_p:.8f}" if entry_p < 0.01 else f"${entry_p:.6f}"
                 exit_str = f"${exit_p:.8f}" if 0 < exit_p < 0.01 else (f"${exit_p:.6f}" if exit_p > 0 else "N/A")
 
+                entry_mcap = entry_p * 1_000_000_000 if addr.endswith("pump") else 0.0
+                exit_mcap = exit_p * 1_000_000_000 if addr.endswith("pump") and exit_p > 0 else 0.0
+                e_mc_str = f" (MC: {format_mcap(entry_mcap)})" if entry_mcap > 0 else ""
+                x_mc_str = f" (MC: {format_mcap(exit_mcap)})" if exit_mcap > 0 else ""
+
                 block = (
                     f"{i}. {ret_emoji} <b>${sym}</b> [{src}]\n"
                     f"   {reason_emoji} Exit: <b>{ret:+.1f}%</b> via {reason}\n"
                     f"   ⏱ Hold: <b>{hold:.0f}m</b> | Score: <b>{score:.0f}</b>\n"
-                    f"   💰 Entry: {entry_str} → Exit: {exit_str}\n"
+                    f"   💰 Entry: {entry_str}{e_mc_str} → Exit: {exit_str}{x_mc_str}\n"
                     f"   <code>{addr}</code>"
                 )
                 trade_blocks.append(block)

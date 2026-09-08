@@ -291,13 +291,36 @@ class VolumeVelocityEngine:
                     ratio = 0.0
                     normalized_score = 0.0
             else:
+                # ── Trenches Momentum Volume Scaling ──
                 ratio = buy_count / max(sell_count, 1.0)
                 max_ratio = settings.vol_velocity_buy_sell_ratio_max
-                normalized_score = min((ratio / max_ratio) * 100.0, 100.0)
-
-                # Penalty if sell count is higher than buy count
+                # Ratio score represents buy pressure (0-100)
+                ratio_score = min((ratio / max_ratio) * 100.0, 100.0)
                 if sell_count > buy_count:
-                    normalized_score = max(normalized_score * 0.5, 0.0)
+                    ratio_score *= 0.5
+
+                # Total nominal volume in SOL (buy + sell)
+                total_vol_sol = buy_vol_sol + sell_vol_sol
+
+                # Volume multiplier based on actual SOL committed in trenches:
+                # Target: 5.0 SOL (~$700+) for full volume score potential.
+                # If < 1.0 SOL, token is too illiquid / stagnant -> capped at 20.0 max.
+                # If 1.0 - 5.0 SOL -> linearly scaled between 20% and 100%.
+                # If >= 5.0 SOL -> full ratio score allowed.
+                MIN_BENCHMARK_SOL = 1.0
+                TARGET_VOLUME_SOL = 5.0
+
+                if total_vol_sol < MIN_BENCHMARK_SOL:
+                    # Stagnant / ghost token with negligible liquidity
+                    vol_scale = min(total_vol_sol / MIN_BENCHMARK_SOL, 1.0) * 0.20
+                    normalized_score = min(ratio_score * vol_scale, 20.0)
+                elif total_vol_sol < TARGET_VOLUME_SOL:
+                    # Moderate early volume
+                    vol_scale = 0.20 + 0.80 * ((total_vol_sol - MIN_BENCHMARK_SOL) / (TARGET_VOLUME_SOL - MIN_BENCHMARK_SOL))
+                    normalized_score = ratio_score * vol_scale
+                else:
+                    # Explosive / strong trenches volume >= 5 SOL
+                    normalized_score = ratio_score
 
             return VolumeVelocityResult(
                 score=round(normalized_score, 2),

@@ -160,42 +160,6 @@ async def _fetch_helius_das(client: httpx.AsyncClient, mint: str) -> Optional[Pr
         return None
 
 
-async def _fetch_rpc_reserves(client: httpx.AsyncClient, mint: str) -> Optional[PriceSnapshot]:
-    """Tier 3: Solana RPC — basic token supply query as last-resort price proxy."""
-    try:
-        from src.utils.price_feed import price_feed
-        sol_price = await price_feed.get_sol_price_usd()
-
-        resp = await client.post(
-            settings.helius_rpc_url,
-            json={
-                "jsonrpc": "2.0", "id": "supply",
-                "method": "getTokenSupply",
-                "params": [mint]
-            },
-            timeout=8.0
-        )
-        if resp.status_code != 200:
-            return None
-        result = resp.json().get("result", {}).get("value", {})
-        supply = float(result.get("uiAmount", 0) or 0)
-        if supply > 0:
-            # Very rough estimate based on typical pump.fun bonding curve
-            estimated_mcap = sol_price * 30.0  # 30 SOL initial virtual reserve
-            price_est = estimated_mcap / supply
-            return PriceSnapshot(
-                price_usd=price_est,
-                liquidity_usd=0.0,
-                volume_24h_usd=0.0,
-                source="rpc",
-                market_cap_usd=estimated_mcap,
-            )
-        return None
-    except Exception as e:
-        logger.debug(f"RPC reserve price fetch error for {mint[:8]}: {e}")
-        return None
-
-
 # Shared HTTP client for price fetcher
 _shared_client: Optional[httpx.AsyncClient] = None
 
@@ -212,9 +176,11 @@ async def _get_client() -> httpx.AsyncClient:
 
 async def fetch_price(mint: str, bonding_curve_address: Optional[str] = None) -> Optional[PriceSnapshot]:
     """
-    Fetches current price from multi-tier fallback chain.
-    For ungraduated pump.fun tokens, on-chain bonding curve or official pumpfun pair is prioritized.
-    Returns PriceSnapshot or None if all tiers fail.
+    Fetches current price from multi-tier verified sources:
+    - Tier 1: On-chain Pump.fun Bonding Curve account state (exact virtual reserves)
+    - Tier 2: DexScreener verified pools (pumpfun, pumpswap, raydium, meteora, orca)
+    - Tier 3: Helius DAS verified token price info
+    Returns PriceSnapshot or None if all verified sources fail. NEVER fabricates fake prices.
     """
     client = await _get_client()
 
@@ -250,7 +216,7 @@ async def fetch_price(mint: str, bonding_curve_address: Optional[str] = None) ->
         except Exception as bc_err:
             logger.debug(f"Bonding curve price fetch failed for {mint[:8]}: {bc_err}")
 
-    # Tier 2: DexScreener (with strict DEX whitelist to reject spoofed pools like pumpswap)
+    # Tier 2: DexScreener (with verified DEX pools)
     snap = await _fetch_dexscreener(client, mint)
     if snap:
         return snap
@@ -260,12 +226,7 @@ async def fetch_price(mint: str, bonding_curve_address: Optional[str] = None) ->
     if snap:
         return snap
 
-    # Tier 4: RPC reserves
-    snap = await _fetch_rpc_reserves(client, mint)
-    if snap:
-        return snap
-
-    logger.warning(f"⚠️ All price tiers failed for {mint[:8]}...")
+    logger.warning(f"⚠️ All verified price tiers failed for {mint[:8]}...")
     return None
 
 

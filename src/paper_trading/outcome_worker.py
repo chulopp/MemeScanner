@@ -154,10 +154,14 @@ class OutcomeWorker:
                     "source": source
                 }
             else:
+                exit_p = float(trade.get("exit_price_usd", 0.0) or 0.0)
+                exit_mc = exit_p * 1_000_000_000 if token_address.endswith("pump") and exit_p > 0 else 0.0
                 return {
                     "status": "CLOSED",
                     "exit_reason": exit_reason,
                     "return_pct": float(trade.get("realized_return_pct", 0.0) or 0.0),
+                    "exit_price": exit_p,
+                    "exit_mcap": exit_mc,
                     "score": score,
                     "source": source
                 }
@@ -279,6 +283,10 @@ class OutcomeWorker:
             # Check paper trading execution correlation
             paper_trade_info = await self._get_paper_trade_status(mint, signal_id)
 
+            entry_mcap = entry_price * 1_000_000_000 if mint.endswith("pump") and entry_price > 0 else 0.0
+            cur_mcap = current_price * 1_000_000_000 if mint.endswith("pump") and current_price > 0 else 0.0
+            ath_mcap = ath * 1_000_000_000 if mint.endswith("pump") and ath > 0 else 0.0
+
             # Send Telegram outcome update for key windows (1h, 4h, 24h)
             if window_name in ("1h", "4h", "24h"):
                 await telegram_notifier.send_outcome_update(
@@ -290,6 +298,12 @@ class OutcomeWorker:
                     mae_pct=abs(mae_pct),
                     status=status,
                     paper_trade_info=paper_trade_info,
+                    entry_price=entry_price,
+                    current_price=current_price,
+                    ath_price=ath,
+                    entry_mcap=entry_mcap,
+                    current_mcap=cur_mcap,
+                    ath_mcap=ath_mcap,
                 )
 
         except Exception as e:

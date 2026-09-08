@@ -60,9 +60,11 @@ class HolderCurveEngine:
             return 90.0   # HYPOTHESIS_INIT: Solid half-way momentum
         elif bonding_pct >= 15.0:
             return 65.0   # HYPOTHESIS_INIT: Healthy accumulation phase
+        elif bonding_pct >= 3.0:
+            return 40.0   # Early momentum accumulation beyond dev
         elif bonding_pct > 0.0:
-            return 30.0   # HYPOTHESIS_INIT: Very early infancy
-        return 15.0
+            return 10.0   # Negligible progress (< 3% bonding curve = dev creation only)
+        return 5.0
 
     def _calculate_holders_score(self, holder_count: int) -> float:
         """

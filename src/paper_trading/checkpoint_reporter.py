@@ -175,13 +175,17 @@ async def generate_checkpoint_report(trigger: str = "MANUAL") -> str:
     if total_skipped > 0:
         skipped_capacity = sum(1 for s in skipped if s.get("skipped_reason") == "SKIPPED_CAPACITY")
         skipped_dup = sum(1 for s in skipped if s.get("skipped_reason") == "DUPLICATE")
+        skipped_cash = sum(1 for s in skipped if s.get("skipped_reason") == "SKIPPED_INSUFFICIENT_CASH")
         lines.append("\n" + "=" * 40)
         lines.append("<b>⛔ Sinyal yang Dilewati</b>")
         lines.append("=" * 40)
         lines.append(f"  Kapasitas penuh: {skipped_capacity}")
         lines.append(f"  Duplikat token: {skipped_dup}")
+        lines.append(f"  Kas tidak cukup: {skipped_cash}")
         if skipped_capacity > 0:
             lines.append("  ⚠️ Ada sinyal valid yang missed — pertimbangkan naikkan max_positions di Day 40+ jika EV positif")
+        if skipped_cash > 0:
+            lines.append("  🛑 Ada sinyal valid dilewati karena modal/kas tidak mencukupi (capital guard aktif)")
 
     # ── Disclaimer ──
     lines.append("")

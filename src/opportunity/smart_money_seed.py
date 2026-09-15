@@ -104,7 +104,28 @@ CURATED_SMART_MONEY_SEEDS: list[dict] = [
         "tier": "ACTIVE",
         "source": "USER_CURATED",
         "notes": "User-verified smart money wallet"
-    }
+    },
+    # Phase 2 user-curated additions
+    {"wallet_address": "2M2vLX34LXMg24dMEnjWHvRXS1tshpEDRWzmXgV8ENNZ", "tier": "ACTIVE", "source": "USER_CURATED", "notes": "Phase 2 user addition"},
+    {"wallet_address": "6HcrxubcevZQs1fcPTVnywzw7N2XWqsyAPxqnmg78UMg", "tier": "ACTIVE", "source": "USER_CURATED", "notes": "Phase 2 user addition"},
+    {"wallet_address": "5FGoPPj1nL8LCnfVnpTmreqQtqLuMXXAwuS1uahMrp8V", "tier": "ACTIVE", "source": "USER_CURATED", "notes": "Phase 2 user addition"},
+    {"wallet_address": "7YoMjEFGiEcMhYPoksbPP3fdtvpUenYYixdX9TgXz1AY", "tier": "ACTIVE", "source": "USER_CURATED", "notes": "Phase 2 user addition"},
+    {"wallet_address": "DgHAu1pJKydHqRM7SteoS2K4U8pNMkxW4X2SsSTHYwwY", "tier": "ACTIVE", "source": "USER_CURATED", "notes": "Phase 2 user addition"},
+    {"wallet_address": "BnYk6Dph4CXM5FDhskAqbcGurq4QYQx2fQwLxPzPYKT6", "tier": "ACTIVE", "source": "USER_CURATED", "notes": "Phase 2 user addition"},
+    {"wallet_address": "CzwWvTVn39dSd4LiVc6W9gZxgu36737M2fcX4EWhquh4", "tier": "ACTIVE", "source": "USER_CURATED", "notes": "Phase 2 user addition"},
+    {"wallet_address": "EoxtfjMw48FxC158esdyvbejj2t6tQw1VTxgHwcHkb72", "tier": "ACTIVE", "source": "USER_CURATED", "notes": "Phase 2 user addition"},
+    {"wallet_address": "Fzz2amRoCCpEvxtwdurs8qLVLSdrd3dcraJVpNjE4rp4", "tier": "ACTIVE", "source": "USER_CURATED", "notes": "Phase 2 user addition"},
+    {"wallet_address": "7dsEvQJ8wJxRJnWGqjWhL52UnnktTpwQJRrbVHik7XiT", "tier": "ACTIVE", "source": "USER_CURATED", "notes": "Phase 2 user addition"},
+    {"wallet_address": "CNudZYFgpbT26fidsiNrWfHeGTBMMeVWqruZXsEkcUPc", "tier": "ACTIVE", "source": "USER_CURATED", "notes": "Phase 2 user addition"},
+    {"wallet_address": "CPZfoAcQKnsWYApcFR7jh2GvtbUGjcjSARCZsypmBGhP", "tier": "ACTIVE", "source": "USER_CURATED", "notes": "Phase 2 user addition"},
+    {"wallet_address": "B3LuC4vz1JuHrQAoK4Todgcu75vmD5Z9pWTFBxw5XigZ", "tier": "ACTIVE", "source": "USER_CURATED", "notes": "Phase 2 user addition"},
+    {"wallet_address": "u2vbjD14qYsm36WJXkg2wJckQJrcA4v9ZwP1Y8ypGzk", "tier": "ACTIVE", "source": "USER_CURATED", "notes": "Phase 2 user addition"},
+    {"wallet_address": "GUGHa8viMpJuyEAFU9BnVFy5LjwgYMLuG8qN4oqd5ufJ", "tier": "ACTIVE", "source": "USER_CURATED", "notes": "Phase 2 user addition"},
+    {"wallet_address": "AcoNeFQsTPYs7ZrH8RMWaxxGJTTQJJ4H5aTXmptaz5UK", "tier": "ACTIVE", "source": "USER_CURATED", "notes": "Phase 2 user addition"},
+    {"wallet_address": "2aPnFbwMj2oGCDzS9MjCWvJiQdSNaF9o3zs3CVR6ZJ49", "tier": "ACTIVE", "source": "USER_CURATED", "notes": "Phase 2 user addition"},
+    {"wallet_address": "Cr1n5ZTc1W42zxHQ2LEAHUyvKPrm3ABAHKmFABMh9bKT", "tier": "ACTIVE", "source": "USER_CURATED", "notes": "Phase 2 user addition"},
+    {"wallet_address": "J9jUL2vgRb8fDurmEUiPx5hP91trbpdWTQt6cq7jjMVR", "tier": "ACTIVE", "source": "USER_CURATED", "notes": "Phase 2 user addition"},
+    {"wallet_address": "4UrFSCrGxgoCtCUBAEZq7ZmPK3Pczkxx7PwYnkBMi1KR", "tier": "ACTIVE", "source": "USER_CURATED", "notes": "Phase 2 user addition"}
 ]
 
 

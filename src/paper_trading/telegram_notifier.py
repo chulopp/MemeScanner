@@ -546,7 +546,7 @@ class TelegramNotifier:
         opportunity_score: float = 0.0,
         signal_source: str = "",
     ) -> None:
-        """Notif saat posisi ditutup karena melebihi batas waktu maksimal hold (4 jam)."""
+        """Notif saat posisi ditutup karena melebihi batas waktu maksimal hold (2 jam)."""
         if not self._enabled:
             return
         self._ensure_bot()
@@ -568,7 +568,7 @@ class TelegramNotifier:
         ret_emoji = "🟢" if return_pct >= 0 else "🔴"
 
         text = (
-            f"⌛ <b>Timeout Exit (4 Jam)</b>: ${_html.escape(symbol)}{sig_info}\n"
+            f"⌛ <b>Timeout Exit (2 Jam)</b>: ${_html.escape(symbol)}{sig_info}\n"
             f"<code>{token_address}</code>\n"
             f"{price_trajectory}{mcap_trajectory}\n"
             f"{ret_emoji} Return: <b>{return_pct:+.1f}%</b>\n"
@@ -583,7 +583,7 @@ class TelegramNotifier:
         except Exception as e:
             logger.debug(f"send_timeout_hit failed: {e}")
 
-    async def send_stagnant_exit(
+    async def send_time_decay_exit(
         self,
         symbol: str,
         token_address: str,
@@ -597,8 +597,8 @@ class TelegramNotifier:
         opportunity_score: float = 0.0,
         signal_source: str = "",
     ) -> None:
-        """Notif saat posisi zombie ditutup karena tidak ada pergerakan setelah 30 menit (MFE < +10%).
-        Label berbeda dari TIMEOUT_4H agar mudah dianalisis di histori."""
+        """v2.0: Notif saat posisi ditutup oleh time-decay stop loss (30m, MFE < 15%).
+        Menggantikan send_stagnant_exit dari v1.3."""
         if not self._enabled:
             return
         self._ensure_bot()
@@ -608,24 +608,24 @@ class TelegramNotifier:
         import html as _html
         mcap_trajectory = ""
         if entry_mcap > 0 and exit_mcap > 0:
-            mcap_trajectory = f"\n🧢 MC: <b>{format_mcap(entry_mcap)} ➔ {format_mcap(exit_mcap)}</b>"
+            mcap_trajectory = f"\n🧢 MC: <b>{format_mcap(entry_mcap)} ➡️ {format_mcap(exit_mcap)}</b>"
 
         price_trajectory = ""
         if entry_price > 0 and exit_price > 0:
             p_entry = f"${entry_price:.8f}" if entry_price < 0.01 else f"${entry_price:.6f}"
             p_exit = f"${exit_price:.8f}" if exit_price < 0.01 else f"${exit_price:.6f}"
-            price_trajectory = f"\n💰 Entry: <b>{p_entry}</b> ➔ Exit: <b>{p_exit}</b>"
+            price_trajectory = f"\n💰 Entry: <b>{p_entry}</b> ➡️ Exit: <b>{p_exit}</b>"
 
         sig_info = f" ({signal_source} | Score: {opportunity_score:.1f})" if opportunity_score > 0 else ""
         ret_emoji = "🟢" if return_pct >= 0 else "🔴"
 
         text = (
-            f"💤 <b>Stagnancy Exit (Zombie Kill)</b>: ${_html.escape(symbol)}{sig_info}\n"
+            f"\u23f3 <b>Time-Decay Exit</b>: ${_html.escape(symbol)}{sig_info}\n"
             f"<code>{token_address}</code>\n"
             f"{price_trajectory}{mcap_trajectory}\n"
-            f"{ret_emoji} Return: <b>{return_pct:+.1f}%</b> | 🏔 MFE: <b>{mfe_pct:+.1f}%</b>\n"
-            f"⏱ Di-hold: <b>{hold_minutes:.0f} menit</b> tanpa gerak signifikan\n"
-            f"♻️ <i>Slot dibebaskan untuk token runner berikutnya.</i>"
+            f"{ret_emoji} Return: <b>{return_pct:+.1f}%</b> | \ud83c\udfd4 MFE: <b>{mfe_pct:+.1f}%</b>\n"
+            f"\u23f1 Di-hold: <b>{hold_minutes:.0f} menit</b> tanpa gerak signifikan (&lt;15% MFE)\n"
+            f"\u267b\ufe0f <i>Slot dibebaskan \u2014 time-decay v2.0 kill.</i>"
         )
         try:
             await self._bot.send_message(
@@ -633,7 +633,59 @@ class TelegramNotifier:
                 disable_web_page_preview=True
             )
         except Exception as e:
-            logger.debug(f"send_stagnant_exit failed: {e}")
+            logger.debug(f"send_time_decay_exit failed: {e}")
+
+    async def send_rug_detected(
+        self,
+        symbol: str,
+        token_address: str,
+        return_pct: float,
+        mfe_pct: float,
+        hold_minutes: float,
+        entry_price: float = 0.0,
+        exit_price: float = 0.0,
+        entry_mcap: float = 0.0,
+        exit_mcap: float = 0.0,
+        opportunity_score: float = 0.0,
+        signal_source: str = "",
+    ) -> None:
+        """v2.0: Notif saat posisi exit darurat akibat deteksi rug (LP collapse >80%)."""
+        if not self._enabled:
+            return
+        self._ensure_bot()
+        if not self._bot:
+            return
+
+        import html as _html
+        mcap_trajectory = ""
+        if entry_mcap > 0 and exit_mcap > 0:
+            mcap_trajectory = f"\n\ud83e\udde2 MC: <b>{format_mcap(entry_mcap)} \u27a1\ufe0f {format_mcap(exit_mcap)}</b>"
+
+        price_trajectory = ""
+        if entry_price > 0 and exit_price > 0:
+            p_entry = f"${entry_price:.8f}" if entry_price < 0.01 else f"${entry_price:.6f}"
+            p_exit = f"${exit_price:.8f}" if exit_price < 0.01 else f"${exit_price:.6f}"
+            price_trajectory = f"\n\ud83d\udcb0 Entry: <b>{p_entry}</b> \u27a1\ufe0f Exit: <b>{p_exit}</b>"
+
+        sig_info = f" ({signal_source} | Score: {opportunity_score:.1f})" if opportunity_score > 0 else ""
+
+        text = (
+            f"\ud83d\udea8 <b>RUG DETECTED \u2014 Emergency Exit</b>: ${_html.escape(symbol)}{sig_info}\n"
+            f"<code>{token_address}</code>\n"
+            f"{price_trajectory}{mcap_trajectory}\n"
+            f"\ud83d\udd34 Return: <b>{return_pct:+.1f}%</b> | \ud83c\udfd4 MFE: <b>{mfe_pct:+.1f}%</b>\n"
+            f"\u23f1 Di-hold: <b>{hold_minutes:.0f} menit</b>\n"
+            f"\u26a0\ufe0f <i>Likuiditas LP kolaps &gt;80% dari baseline entry \u2014 rug guard aktif.</i>"
+        )
+        try:
+            await self._bot.send_message(
+                chat_id=self._chat_id, text=text, parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+        except Exception as e:
+            logger.debug(f"send_rug_detected failed: {e}")
+
+
 
     # ──────────────────────────────────────────
     # Read-only Telegram command listener

@@ -1,5 +1,5 @@
 """
-Position Tracker — Paper Trading Live
+Position Tracker — Paper Trading Live (v2.0)
 Live virtual position management with real-time MFE tracking and TP/SL execution.
 
 Architecture:
@@ -7,14 +7,18 @@ Architecture:
   - Polling loop (30s): Checks price for all open positions, updates MFE, triggers TP/SL
   - close_position(): Calculates mfe_pct, captured_ratio, records final state to DB
 
-Frozen Parameters (per Implementation Plan, do NOT change before Checkpoint Day 40):
-  - Threshold: 60.0
-  - SL: -30%
-  - TP1: +100% → sell 30% of position
-  - TP2: +300% → sell 30% of position
-  - TP3: +500% → sell 20% of position
-  - Moonbag: remaining 20% with 40%-from-ATH trailing stop
-  - Position Size: $2 per trade
+Parameter Version v2.0 (Exit Engine v2):
+  - Threshold: 60.0 (unchanged)
+  - SL: -30% (base), tightened to -15% at 15m if MFE<15%, exit at 30m if MFE<15% [TIME_DECAY]
+  - Breakeven stop: +50% trigger → SL moves to -10%
+  - TP0: +50% → sell 15%
+  - TP1: +100% → sell 25%
+  - TP2: +300% → sell 25%
+  - TP3: +500% → sell 15%
+  - Moonbag: remaining 20% with tiered trailing (25%/35%/45% from ATH)
+  - Rug guard: exit if liquidity drops >80% from entry baseline
+  - Max hold: 2 hours (TIMEOUT_2H) — down from 4 hours
+  - Position Size: 2% of equity per trade
   - Max Active Positions: 10
   - Price Polling Interval: 30 seconds
 """
@@ -31,29 +35,57 @@ from src.ingestion.schemas import RawTokenEvent
 from src.paper_trading.price_fetcher import fetch_price
 from src.utils.logger import logger
 
-# ─────────────────────────────────────────────
-# FROZEN PARAMETERS — do NOT modify until Day 40
-# ─────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────
+# FROZEN PARAMETERS — Exit Engine v2.0 (do NOT change without /grill-me)
+# ──────────────────────────────────────────────────────────────────────────
 FROZEN_PARAMS = {
     "opportunity_threshold": float(settings.opportunity_threshold),
-    "stop_loss_pct": -30.0,           # Hard stop at -30%
-    "tp1_pct": 100.0,                 # Take Profit tier 1: +100%
-    "tp1_sell_fraction": 0.30,        # Sell 30% of position at TP1
-    "tp2_pct": 300.0,                 # Take Profit tier 2: +300%
-    "tp2_sell_fraction": 0.30,        # Sell 30% of position at TP2
-    "tp3_pct": 500.0,                 # Take Profit tier 3: +500%
-    "tp3_sell_fraction": 0.20,        # Sell 20% of position at TP3
-    "moonbag_fraction": 0.20,         # 20% moonbag after TP3
-    "trailing_stop_from_ath_pct": 40.0,  # Exit moonbag if drops 40% from ATH
-    "max_hold_hours": 4.0,            # Max hold duration: 4 hours timeout exit
-    "stagnancy_check_minutes": 30.0,  # v1.3: Zombie kill — check after 30 minutes
-    "stagnancy_mfe_threshold_pct": 10.0,  # v1.3: Close if MFE < +10% after stagnancy window
+
+    # ── Stop Loss ──
+    "stop_loss_pct": -30.0,           # Base SL at -30% (phase 1 of time-decay)
+    "breakeven_trigger_pct": 50.0,    # v2.0: Trigger breakeven stop at +50%
+    "breakeven_sl_pct": -10.0,        # v2.0: SL after breakeven activated (loose room for noise)
+
+    # ── Time-decay Stop Loss (replaces stagnancy v1.3) ──
+    "time_decay_tighten_minutes": 15.0,   # v2.0: Phase 2 starts after 15m
+    "time_decay_exit_minutes": 30.0,      # v2.0: Phase 3 (force exit) after 30m
+    "time_decay_mfe_threshold_pct": 15.0, # v2.0: If MFE < 15%, time-decay triggers
+    "time_decay_sl_tighten_pct": -15.0,  # v2.0: Phase 2 SL tightened to -15%
+
+    # ── Take Profit Tiers ──
+    "tp0_pct": 50.0,                  # v2.0: New TP0 tier: +50%
+    "tp0_sell_fraction": 0.15,        # v2.0: Sell 15% at TP0
+    "tp1_pct": 100.0,                 # TP1: +100%
+    "tp1_sell_fraction": 0.25,        # v2.0: Sell 25% at TP1 (was 30%)
+    "tp2_pct": 300.0,                 # TP2: +300%
+    "tp2_sell_fraction": 0.25,        # v2.0: Sell 25% at TP2 (was 30%)
+    "tp3_pct": 500.0,                 # TP3: +500%
+    "tp3_sell_fraction": 0.15,        # v2.0: Sell 15% at TP3 (was 20%)
+    "moonbag_fraction": 0.20,         # 20% moonbag after TP3 (unchanged)
+
+    # ── Tiered Trailing Stop (replaces flat 40% from ATH) ──
+    # Active after TP3 (moonbag phase). Trailing % based on current ATH return.
+    "trailing_tier1_max_return": 200.0,  # v2.0: ATH return 50%-200% → 25% trailing
+    "trailing_tier1_pct": 25.0,
+    "trailing_tier2_max_return": 500.0,  # v2.0: ATH return 200%-500% → 35% trailing
+    "trailing_tier2_pct": 35.0,
+    "trailing_tier3_pct": 45.0,          # v2.0: ATH return >500% → 45% trailing
+
+    # ── Rug Guard ──
+    "rug_guard_drop_threshold_pct": 80.0,  # v2.0: Exit if liquidity drops >80% from entry
+
+    # ── Timing ──
+    "max_hold_hours": 2.0,            # v2.0: Reduced from 4h to 2h (TIMEOUT_2H)
+
+    # ── Position Sizing ──
     "position_size_usd": 2.0,         # Fallback / initial $2 per trade (2% of $100 virtual)
     "position_risk_pct": 2.0,         # 2% of current equity per trade (rebased dynamic sizing)
     "min_position_size_usd": 0.05,    # Floor to prevent opening micro-dust positions (< 5 cents)
+
+    # ── Other ──
     "max_active_positions": 10,       # Max simultaneous open positions
     "poll_interval_seconds": 30,      # Price polling cadence
-    "parameter_version": "v1.3",      # v1.3: Stagnancy zombie kill (30m / MFE<10%)
+    "parameter_version": "v2.0",      # v2.0: Exit Engine v2 — time-decay, breakeven, TP0, tiered trailing, rug guard
 }
 
 POLL_DISCLAIMER = (
@@ -73,7 +105,8 @@ class ActivePosition:
     entry_time: datetime
     position_size_usd: float
 
-    # TP milestone state
+    # TP milestone state (persisted to DB to survive restarts)
+    tp0_hit: bool = False          # v2.0: TP0 at +50%
     tp1_hit: bool = False
     tp2_hit: bool = False
     tp3_hit: bool = False
@@ -86,6 +119,10 @@ class ActivePosition:
     bonding_curve_address: Optional[str] = None
     opportunity_score: float = 0.0
     entry_market_cap_usd: float = 0.0
+
+    # v2.0: Exit Engine v2 state (persisted to DB)
+    breakeven_sl_active: bool = False      # True after first reach of +50% — SL moves to -10%
+    liquidity_at_entry_usd: float = 0.0   # Baseline liquidity for rug guard detection
 
     # In-memory latest cached price (updated by _poll_loop for instant UI/PnL responses)
     latest_price_usd: float = 0.0
@@ -240,6 +277,9 @@ class PositionTracker:
             entry_mcap = entry_market_cap_usd or resolved_mcap
             position_size = dynamic_size
 
+            # v2.0: Capture liquidity at entry for rug guard baseline
+            entry_liquidity = price_snap.liquidity_usd if price_snap else 0.0
+
             # ── Insert to DB ──
             record = {
                 "id": position_id,
@@ -256,10 +296,14 @@ class PositionTracker:
                 "parameter_version": FROZEN_PARAMS["parameter_version"],
                 "skipped_reason": None,
                 # TP milestone state — persisted for crash recovery
+                "tp0_hit": False,
                 "tp1_hit": False,
                 "tp2_hit": False,
                 "tp3_hit": False,
                 "remaining_fraction": 1.0,
+                # v2.0: Exit Engine v2 state
+                "breakeven_sl_active": False,
+                "liquidity_at_entry_usd": round(entry_liquidity, 2),
             }
 
             try:
@@ -284,6 +328,8 @@ class PositionTracker:
                 latest_price_usd=entry_price,
                 latest_mcap_usd=entry_mcap,
                 last_price_updated_at=now_utc,
+                # v2.0 new fields
+                liquidity_at_entry_usd=entry_liquidity,
             )
             self._active[position_id] = pos
 
@@ -436,7 +482,7 @@ class PositionTracker:
             await asyncio.sleep(interval)
 
     async def _evaluate_position(self, pos: ActivePosition) -> None:
-        """Fetch current price and evaluate TP/SL conditions for one position."""
+        """Fetch current price and evaluate TP/SL conditions for one position (v2.0)."""
         try:
             snap = await fetch_price(pos.token_address, pos.bonding_curve_address)
             if not snap or snap.price_usd <= 0:
@@ -467,52 +513,118 @@ class PositionTracker:
                 # Persist MFE to DB asynchronously
                 asyncio.create_task(self._update_mfe_in_db(pos.position_id, current_price))
 
-            # ── Stop Loss ──
-            if return_pct <= FROZEN_PARAMS["stop_loss_pct"]:
+            # Compute running MFE % for time-decay checks
+            mfe_pct = (
+                (pos.price_high_ever_seen - entry) / entry * 100.0
+                if entry > 0 else 0.0
+            )
+
+            # ── 1. Rug Guard (safety-net, runs first — parallel to all other logic) ──
+            # v2.0: exit immediately if liquidity collapses >80% from entry baseline.
+            rug_threshold = FROZEN_PARAMS["rug_guard_drop_threshold_pct"]
+            current_liquidity = snap.liquidity_usd
+            if (
+                pos.liquidity_at_entry_usd > 0
+                and current_liquidity > 0
+                and current_liquidity < pos.liquidity_at_entry_usd * (1.0 - rug_threshold / 100.0)
+            ):
+                drop_pct = (1.0 - current_liquidity / pos.liquidity_at_entry_usd) * 100.0
+                logger.warning(
+                    f"🚨 [RUG_DETECTED] ${pos.symbol} — liquidity collapsed "
+                    f"{drop_pct:.0f}% (${current_liquidity:.0f} from ${pos.liquidity_at_entry_usd:.0f}) — "
+                    f"exiting immediately"
+                )
+                await self._close_position(pos, current_price, "RUG_DETECTED")
+                return
+
+            # ── 2. Effective Stop Loss (adapts based on breakeven state + time-decay phase) ──
+            hold_hours = (datetime.now(tz=timezone.utc) - pos.entry_time).total_seconds() / 3600.0
+            hold_minutes = hold_hours * 60.0
+
+            td_mfe_threshold = FROZEN_PARAMS["time_decay_mfe_threshold_pct"]
+            td_tighten_min   = FROZEN_PARAMS["time_decay_tighten_minutes"]
+            td_exit_min      = FROZEN_PARAMS["time_decay_exit_minutes"]
+            base_sl          = FROZEN_PARAMS["stop_loss_pct"]           # -30%
+            tight_sl         = FROZEN_PARAMS["time_decay_sl_tighten_pct"]  # -15%
+            be_sl            = FROZEN_PARAMS["breakeven_sl_pct"]        # -10%
+
+            # Determine effective SL for this poll:
+            # Breakeven overrides time-decay if active (tighter protection)
+            if pos.breakeven_sl_active:
+                effective_sl = be_sl  # -10%
+            elif hold_minutes >= td_tighten_min and mfe_pct < td_mfe_threshold:
+                effective_sl = tight_sl  # -15% (time-decay phase 2)
+            else:
+                effective_sl = base_sl   # -30% (base)
+
+            if return_pct <= effective_sl:
+                phase = "breakeven" if pos.breakeven_sl_active else (
+                    "time-decay-tight" if effective_sl == tight_sl else "base"
+                )
+                logger.info(
+                    f"🛑 [SL/{phase.upper()}] ${pos.symbol} — return {return_pct:+.1f}% "
+                    f"≤ effective SL {effective_sl:+.1f}% (held {hold_minutes:.0f}m, MFE {mfe_pct:+.1f}%)"
+                )
                 await self._close_position(pos, current_price, "SL")
                 return
 
-            # ── Max Hold Duration (Timeout 4 Jam) ──
-            hold_hours = (datetime.now(tz=timezone.utc) - pos.entry_time).total_seconds() / 3600.0
-            hold_minutes = hold_hours * 60.0
-            if hold_hours >= FROZEN_PARAMS.get("max_hold_hours", 4.0):
+            # ── 3. Time-decay Phase 3: Force exit (replaces stagnancy v1.3) ──
+            # Phase 3 — after 30m: if MFE still below threshold, this is a zombie. Exit.
+            # Condition: NOT triggered if breakeven is already active (position has shown momentum).
+            if (
+                not pos.breakeven_sl_active
+                and not pos.tp0_hit  # TP0 means token reached +50%, not a zombie
+                and hold_minutes >= td_exit_min
+                and mfe_pct < td_mfe_threshold
+            ):
                 logger.info(
-                    f"⌛ [TIMEOUT_4H] ${pos.symbol} reached max hold time ({hold_hours:.1f}h >= {FROZEN_PARAMS.get('max_hold_hours', 4.0)}h) — "
-                    f"closing at market ${current_price:.8f} (ret: {return_pct:+.1f}%)"
+                    f"⏳ [TIME_DECAY] ${pos.symbol} — held {hold_minutes:.0f}m, "
+                    f"MFE only {mfe_pct:+.1f}% (< {td_mfe_threshold}%) — "
+                    f"time-decay exit, freeing slot"
                 )
-                await self._close_position(pos, current_price, "TIMEOUT_4H")
+                await self._close_position(pos, current_price, "TIME_DECAY")
                 return
 
-            # ── Stagnancy Exit (v1.3: Zombie Kill) ──
-            # After 30 minutes: if MFE < +10% and no TP1 hit, this is a zombie token.
-            # Kill it immediately to free the slot for incoming runners.
-            stagnancy_window = FROZEN_PARAMS.get("stagnancy_check_minutes", 30.0)
-            stagnancy_mfe_threshold = FROZEN_PARAMS.get("stagnancy_mfe_threshold_pct", 10.0)
-            if hold_minutes >= stagnancy_window and not pos.tp1_hit:
-                mfe_so_far = (
-                    (pos.price_high_ever_seen - pos.entry_price_usd) / pos.entry_price_usd * 100.0
-                    if pos.entry_price_usd > 0 else 0.0
+            # ── 4. Max Hold Duration (TIMEOUT_2H — hard ceiling) ──
+            if hold_hours >= FROZEN_PARAMS["max_hold_hours"]:
+                logger.info(
+                    f"⌛ [TIMEOUT_2H] ${pos.symbol} reached max hold time "
+                    f"({hold_hours:.1f}h ≥ {FROZEN_PARAMS['max_hold_hours']}h) — "
+                    f"closing at market ${current_price:.8f} (ret: {return_pct:+.1f}%)"
                 )
-                if mfe_so_far < stagnancy_mfe_threshold:
-                    logger.info(
-                        f"💤 [STAGNANT] ${pos.symbol} — held {hold_minutes:.0f}m, "
-                        f"MFE only {mfe_so_far:+.1f}% (< {stagnancy_mfe_threshold}%) — "
-                        f"zombie kill, freeing slot"
-                    )
-                    await self._close_position(pos, current_price, "STAGNANT")
-                    return
+                await self._close_position(pos, current_price, "TIMEOUT_2H")
+                return
 
-            # ── TP1: +100% ──
-            if not pos.tp1_hit and return_pct >= FROZEN_PARAMS["tp1_pct"]:
+            # ── 5. Breakeven Stop Activation ──
+            # v2.0: once return reaches +50%, move SL to -10% (protect from round-trip losses)
+            be_trigger = FROZEN_PARAMS["breakeven_trigger_pct"]
+            if not pos.breakeven_sl_active and return_pct >= be_trigger:
+                pos.breakeven_sl_active = True
+                asyncio.create_task(self._persist_tp_state(pos))
+                logger.info(
+                    f"🔒 [BREAKEVEN] ${pos.symbol} hit +{be_trigger:.0f}% — "
+                    f"SL moved from {base_sl:+.0f}% to {be_sl:+.0f}% (breakeven guard activated)"
+                )
+
+            # ── 6. TP0: +50% ──
+            if not pos.tp0_hit and return_pct >= FROZEN_PARAMS["tp0_pct"]:
+                pos.tp0_hit = True
+                sell_fraction = FROZEN_PARAMS["tp0_sell_fraction"]
+                pos.remaining_fraction -= sell_fraction
+                logger.info(f"🎯 [TP0] ${pos.symbol} hit +50% — selling {sell_fraction*100:.0f}%")
+                asyncio.create_task(self._persist_tp_state(pos))
+                asyncio.create_task(self._notify_tp_hit(pos, "TP0", return_pct, sell_fraction, current_price))
+
+            # ── 7. TP1: +100% ──
+            if pos.tp0_hit and not pos.tp1_hit and return_pct >= FROZEN_PARAMS["tp1_pct"]:
                 pos.tp1_hit = True
                 sell_fraction = FROZEN_PARAMS["tp1_sell_fraction"]
                 pos.remaining_fraction -= sell_fraction
                 logger.info(f"🎯 [TP1] ${pos.symbol} hit +100% — selling {sell_fraction*100:.0f}%")
-                # Persist TP state immediately to survive restarts
                 asyncio.create_task(self._persist_tp_state(pos))
                 asyncio.create_task(self._notify_tp_hit(pos, "TP1", return_pct, sell_fraction, current_price))
 
-            # ── TP2: +300% ──
+            # ── 8. TP2: +300% ──
             if pos.tp1_hit and not pos.tp2_hit and return_pct >= FROZEN_PARAMS["tp2_pct"]:
                 pos.tp2_hit = True
                 sell_fraction = FROZEN_PARAMS["tp2_sell_fraction"]
@@ -521,7 +633,7 @@ class PositionTracker:
                 asyncio.create_task(self._persist_tp_state(pos))
                 asyncio.create_task(self._notify_tp_hit(pos, "TP2", return_pct, sell_fraction, current_price))
 
-            # ── TP3: +500% ──
+            # ── 9. TP3: +500% ──
             if pos.tp2_hit and not pos.tp3_hit and return_pct >= FROZEN_PARAMS["tp3_pct"]:
                 pos.tp3_hit = True
                 sell_fraction = FROZEN_PARAMS["tp3_sell_fraction"]
@@ -529,21 +641,31 @@ class PositionTracker:
                 logger.info(f"🎯 [TP3] ${pos.symbol} hit +500% — selling {sell_fraction*100:.0f}%")
                 asyncio.create_task(self._persist_tp_state(pos))
                 asyncio.create_task(self._notify_tp_hit(pos, "TP3", return_pct, sell_fraction, current_price))
-                # After TP3, remaining 20% becomes moonbag — we continue tracking
-
-                # Record TP3 event (partial close of TP1+TP2+TP3 = 80% of position)
+                # After TP3, remaining 20% becomes moonbag — close main trade, continue moonbag tracking
                 await self._close_position(pos, current_price, "TP3")
                 return
 
-            # ── Moonbag Trailing Stop ──
-            # Applies after TP3: if moonbag and price falls 40% from ATH
+            # ── 10. Tiered Trailing Stop (moonbag phase, active after TP3) ──
+            # v2.0: trailing % adjusts based on how far the token has run from entry.
             if pos.tp3_hit:
                 ath_return_pct = ((pos.price_high_ever_seen - entry) / entry) * 100.0
                 drop_from_ath = ((current_price - pos.price_high_ever_seen) / pos.price_high_ever_seen) * 100.0
-                if drop_from_ath <= -FROZEN_PARAMS["trailing_stop_from_ath_pct"]:
+
+                # Determine trailing tier based on ATH return
+                t1_max = FROZEN_PARAMS["trailing_tier1_max_return"]
+                t2_max = FROZEN_PARAMS["trailing_tier2_max_return"]
+                if ath_return_pct <= t1_max:
+                    trailing_pct = FROZEN_PARAMS["trailing_tier1_pct"]   # 25%
+                elif ath_return_pct <= t2_max:
+                    trailing_pct = FROZEN_PARAMS["trailing_tier2_pct"]   # 35%
+                else:
+                    trailing_pct = FROZEN_PARAMS["trailing_tier3_pct"]   # 45%
+
+                if drop_from_ath <= -trailing_pct:
                     logger.info(
-                        f"🌙 [TRAILING] ${pos.symbol} moonbag triggered — "
-                        f"ATH: +{ath_return_pct:.0f}%, now dropped {drop_from_ath:.0f}% from ATH"
+                        f"🌙 [TRAILING] ${pos.symbol} moonbag tiered trailing triggered — "
+                        f"ATH: +{ath_return_pct:.0f}%, dropped {drop_from_ath:.0f}% from ATH "
+                        f"(tier: {trailing_pct:.0f}% trailing)"
                     )
                     await self._close_position(pos, current_price, "TRAILING")
                     return
@@ -599,7 +721,11 @@ class PositionTracker:
         except Exception as e:
             logger.error(f"❌ [PositionTracker] Failed to close position {pos.position_id[:8]}: {e}")
 
-        status_emoji = {"SL": "🛑", "TP1": "✅", "TP2": "💚", "TP3": "💎", "TRAILING": "🌙", "TIMEOUT_4H": "⌛", "STAGNANT": "💤"}.get(reason, "📋")
+        status_emoji = {
+            "SL": "🛑", "TP0": "✅", "TP1": "✅", "TP2": "💚", "TP3": "💎",
+            "TRAILING": "🌙", "TIMEOUT_2H": "⌛", "TIME_DECAY": "⏳",
+            "RUG_DETECTED": "🚨",
+        }.get(reason, "📋")
         logger.info(
             f"{status_emoji} [Closed {reason}] ${pos.symbol} | "
             f"Return: {realized_return_pct:+.1f}% | MFE: {mfe_pct:+.1f}% | "
@@ -625,24 +751,26 @@ class PositionTracker:
             logger.debug(f"[PositionTracker] MFE DB update failed for {position_id[:8]}: {e}")
 
     async def _persist_tp_state(self, pos: "ActivePosition") -> None:
-        """Persist current TP milestone state to DB immediately after a TP hit.
-        Prevents double-execution of TP hits after bot restart (Fix #3)."""
+        """Persist current TP milestone state to DB immediately after a TP hit or state change.
+        Prevents double-execution of TPs after bot restart. Also persists breakeven state."""
         try:
             await db_manager.update(
                 "paper_trade_positions",
                 {
+                    "tp0_hit": pos.tp0_hit,
                     "tp1_hit": pos.tp1_hit,
                     "tp2_hit": pos.tp2_hit,
                     "tp3_hit": pos.tp3_hit,
                     "remaining_fraction": round(pos.remaining_fraction, 4),
+                    "breakeven_sl_active": pos.breakeven_sl_active,
                     "updated_at": datetime.now(tz=timezone.utc).isoformat(),
                 },
                 filters={"id": f"eq.{pos.position_id}"}
             )
             logger.debug(
                 f"[PositionTracker] TP state persisted for {pos.symbol}: "
-                f"TP1={pos.tp1_hit}, TP2={pos.tp2_hit}, TP3={pos.tp3_hit}, "
-                f"remaining={pos.remaining_fraction:.2f}"
+                f"TP0={pos.tp0_hit}, TP1={pos.tp1_hit}, TP2={pos.tp2_hit}, TP3={pos.tp3_hit}, "
+                f"breakeven={pos.breakeven_sl_active}, remaining={pos.remaining_fraction:.2f}"
             )
         except Exception as e:
             logger.warning(f"[PositionTracker] TP state persist failed for {pos.position_id[:8]}: {e}")
@@ -715,19 +843,20 @@ class PositionTracker:
                 pos_entry_price = row.get("entry_price_usd", 0.0) or 0.0
                 pos_token_addr = row.get("token_address", "")
 
-                # ── Recover persisted TP milestone state (Fix #3) ──
-                # Restores tp1_hit/tp2_hit/tp3_hit and remaining_fraction from DB
-                # so bot does NOT re-trigger TPs that already fired before restart.
-                recovered_tp1 = bool(row.get("tp1_hit", False))
-                recovered_tp2 = bool(row.get("tp2_hit", False))
-                recovered_tp3 = bool(row.get("tp3_hit", False))
-                recovered_fraction = float(row.get("remaining_fraction", 1.0) or 1.0)
+                # ── Recover persisted TP milestone state (v2.0: includes tp0, breakeven, liquidity) ──
+                recovered_tp0  = bool(row.get("tp0_hit", False))
+                recovered_tp1  = bool(row.get("tp1_hit", False))
+                recovered_tp2  = bool(row.get("tp2_hit", False))
+                recovered_tp3  = bool(row.get("tp3_hit", False))
+                recovered_fraction   = float(row.get("remaining_fraction", 1.0) or 1.0)
+                recovered_breakeven  = bool(row.get("breakeven_sl_active", False))
+                recovered_liquidity  = float(row.get("liquidity_at_entry_usd", 0.0) or 0.0)
 
-                if recovered_tp1 or recovered_tp2 or recovered_tp3:
+                if recovered_tp0 or recovered_tp1 or recovered_tp2 or recovered_tp3 or recovered_breakeven:
                     logger.info(
-                        f"🔄 [PositionTracker] Recovered TP state for {row.get('symbol', 'UNKNOWN')}: "
-                        f"TP1={recovered_tp1}, TP2={recovered_tp2}, TP3={recovered_tp3}, "
-                        f"remaining_fraction={recovered_fraction:.2f}"
+                        f"🔄 [PositionTracker] Recovered state for {row.get('symbol', 'UNKNOWN')}: "
+                        f"TP0={recovered_tp0}, TP1={recovered_tp1}, TP2={recovered_tp2}, TP3={recovered_tp3}, "
+                        f"breakeven={recovered_breakeven}, remaining_fraction={recovered_fraction:.2f}"
                     )
 
                 pos = ActivePosition(
@@ -740,10 +869,13 @@ class PositionTracker:
                     position_size_usd=row.get("position_size_usd", 2.0) or 2.0,
                     price_high_ever_seen=row.get("price_high_ever_seen", 0.0) or 0.0,
                     # Restored from DB — prevents double-execution after restart
+                    tp0_hit=recovered_tp0,
                     tp1_hit=recovered_tp1,
                     tp2_hit=recovered_tp2,
                     tp3_hit=recovered_tp3,
                     remaining_fraction=recovered_fraction,
+                    breakeven_sl_active=recovered_breakeven,
+                    liquidity_at_entry_usd=recovered_liquidity,
                     opportunity_score=float(row.get("opportunity_score_at_entry", 0.0) or 0.0),
                     entry_market_cap_usd=pos_entry_price * 1_000_000_000 if pos_token_addr.endswith("pump") else 0.0,
                     latest_price_usd=pos_entry_price,
@@ -843,7 +975,7 @@ class PositionTracker:
                     opportunity_score=pos.opportunity_score,
                     signal_source=pos.signal_source,
                 )
-            elif reason == "TIMEOUT_4H":
+            elif reason == "TIMEOUT_2H":
                 await telegram_notifier.send_timeout_hit(
                     symbol=pos.symbol,
                     token_address=pos.token_address,
@@ -856,8 +988,24 @@ class PositionTracker:
                     opportunity_score=pos.opportunity_score,
                     signal_source=pos.signal_source,
                 )
-            elif reason == "STAGNANT":
-                await telegram_notifier.send_stagnant_exit(
+            elif reason == "TIME_DECAY":
+                # v2.0: Time-decay replaces stagnancy
+                await telegram_notifier.send_time_decay_exit(
+                    symbol=pos.symbol,
+                    token_address=pos.token_address,
+                    return_pct=realized_return_pct,
+                    mfe_pct=mfe_pct,
+                    hold_minutes=(datetime.now(tz=timezone.utc) - pos.entry_time).total_seconds() / 60.0,
+                    entry_price=pos.entry_price_usd,
+                    exit_price=exit_price,
+                    entry_mcap=pos.entry_market_cap_usd,
+                    exit_mcap=exit_mcap,
+                    opportunity_score=pos.opportunity_score,
+                    signal_source=pos.signal_source,
+                )
+            elif reason == "RUG_DETECTED":
+                # v2.0: Rug guard triggered
+                await telegram_notifier.send_rug_detected(
                     symbol=pos.symbol,
                     token_address=pos.token_address,
                     return_pct=realized_return_pct,
@@ -872,6 +1020,7 @@ class PositionTracker:
                 )
         except Exception as e:
             logger.debug(f"[PositionTracker] notify_closed failed: {e}")
+
 
 
 # Singleton

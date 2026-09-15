@@ -46,10 +46,14 @@ FROZEN_PARAMS = {
     "moonbag_fraction": 0.20,         # 20% moonbag after TP3
     "trailing_stop_from_ath_pct": 40.0,  # Exit moonbag if drops 40% from ATH
     "max_hold_hours": 4.0,            # Max hold duration: 4 hours timeout exit
-    "position_size_usd": 2.0,         # $2 per trade (2% of $100 virtual)
+    "stagnancy_check_minutes": 30.0,  # v1.3: Zombie kill — check after 30 minutes
+    "stagnancy_mfe_threshold_pct": 10.0,  # v1.3: Close if MFE < +10% after stagnancy window
+    "position_size_usd": 2.0,         # Fallback / initial $2 per trade (2% of $100 virtual)
+    "position_risk_pct": 2.0,         # 2% of current equity per trade (rebased dynamic sizing)
+    "min_position_size_usd": 0.05,    # Floor to prevent opening micro-dust positions (< 5 cents)
     "max_active_positions": 10,       # Max simultaneous open positions
     "poll_interval_seconds": 30,      # Price polling cadence
-    "parameter_version": "v1.1",      # Bump on 4H timeout introduction
+    "parameter_version": "v1.3",      # v1.3: Stagnancy zombie kill (30m / MFE<10%)
 }
 
 POLL_DISCLAIMER = (
@@ -182,6 +186,38 @@ class PositionTracker:
                 )
                 return None
 
+            # ── Capital & Cash Guard (Dynamic Equity Rebasing) ──
+            summary = await self.get_portfolio_summary()
+            current_equity = max(summary.get("total_equity", 0.0), 0.0)
+            available_cash = summary.get("available_cash", 0.0)
+            risk_pct = FROZEN_PARAMS.get("position_risk_pct", 2.0)
+            min_size = FROZEN_PARAMS.get("min_position_size_usd", 0.05)
+
+            dynamic_size = round(current_equity * (risk_pct / 100.0), 4)
+
+            # Strict guard: check if bankrupt, cash insufficient, or size below floor
+            if (
+                available_cash <= 0
+                or current_equity <= min_size
+                or dynamic_size < min_size
+                or available_cash < dynamic_size
+            ):
+                logger.warning(
+                    f"⛔ [PositionTracker] Skipping {symbol} — insufficient cash / depleted capital "
+                    f"(Cash: ${available_cash:.2f}, Req: ${dynamic_size:.4f}, Equity: ${current_equity:.2f})"
+                )
+                await self._record_skipped(
+                    position_id=position_id,
+                    token_address=token_address,
+                    symbol=symbol,
+                    signal_source=signal_source,
+                    opportunity_score=opportunity_score,
+                    paper_signal_id=paper_signal_id,
+                    skipped_reason="SKIPPED_INSUFFICIENT_CASH",
+                    now_utc=now_utc,
+                )
+                return None
+
             # ── Fetch Entry Price ──
             resolved_price = 0.0
             resolved_mcap = 0.0
@@ -202,7 +238,7 @@ class PositionTracker:
 
             entry_price = resolved_price
             entry_mcap = entry_market_cap_usd or resolved_mcap
-            position_size = FROZEN_PARAMS["position_size_usd"]
+            position_size = dynamic_size
 
             # ── Insert to DB ──
             record = {
@@ -294,7 +330,7 @@ class PositionTracker:
             realized_pnl_usd += size * (ret_pct / 100.0)
 
         active_list = list(self._active.values())
-        allocated_usd = len(active_list) * POSITION_SIZE
+        allocated_usd = sum(p.position_size_usd for p in active_list)
         available_cash = STARTING_CAPITAL + realized_pnl_usd - allocated_usd
 
         # Compute instant live floating PnL using background-cached prices
@@ -438,6 +474,7 @@ class PositionTracker:
 
             # ── Max Hold Duration (Timeout 4 Jam) ──
             hold_hours = (datetime.now(tz=timezone.utc) - pos.entry_time).total_seconds() / 3600.0
+            hold_minutes = hold_hours * 60.0
             if hold_hours >= FROZEN_PARAMS.get("max_hold_hours", 4.0):
                 logger.info(
                     f"⌛ [TIMEOUT_4H] ${pos.symbol} reached max hold time ({hold_hours:.1f}h >= {FROZEN_PARAMS.get('max_hold_hours', 4.0)}h) — "
@@ -445,6 +482,25 @@ class PositionTracker:
                 )
                 await self._close_position(pos, current_price, "TIMEOUT_4H")
                 return
+
+            # ── Stagnancy Exit (v1.3: Zombie Kill) ──
+            # After 30 minutes: if MFE < +10% and no TP1 hit, this is a zombie token.
+            # Kill it immediately to free the slot for incoming runners.
+            stagnancy_window = FROZEN_PARAMS.get("stagnancy_check_minutes", 30.0)
+            stagnancy_mfe_threshold = FROZEN_PARAMS.get("stagnancy_mfe_threshold_pct", 10.0)
+            if hold_minutes >= stagnancy_window and not pos.tp1_hit:
+                mfe_so_far = (
+                    (pos.price_high_ever_seen - pos.entry_price_usd) / pos.entry_price_usd * 100.0
+                    if pos.entry_price_usd > 0 else 0.0
+                )
+                if mfe_so_far < stagnancy_mfe_threshold:
+                    logger.info(
+                        f"💤 [STAGNANT] ${pos.symbol} — held {hold_minutes:.0f}m, "
+                        f"MFE only {mfe_so_far:+.1f}% (< {stagnancy_mfe_threshold}%) — "
+                        f"zombie kill, freeing slot"
+                    )
+                    await self._close_position(pos, current_price, "STAGNANT")
+                    return
 
             # ── TP1: +100% ──
             if not pos.tp1_hit and return_pct >= FROZEN_PARAMS["tp1_pct"]:
@@ -543,7 +599,7 @@ class PositionTracker:
         except Exception as e:
             logger.error(f"❌ [PositionTracker] Failed to close position {pos.position_id[:8]}: {e}")
 
-        status_emoji = {"SL": "🛑", "TP1": "✅", "TP2": "💚", "TP3": "💎", "TRAILING": "🌙", "TIMEOUT_4H": "⌛"}.get(reason, "📋")
+        status_emoji = {"SL": "🛑", "TP1": "✅", "TP2": "💚", "TP3": "💎", "TRAILING": "🌙", "TIMEOUT_4H": "⌛", "STAGNANT": "💤"}.get(reason, "📋")
         logger.info(
             f"{status_emoji} [Closed {reason}] ${pos.symbol} | "
             f"Return: {realized_return_pct:+.1f}% | MFE: {mfe_pct:+.1f}% | "
@@ -792,6 +848,20 @@ class PositionTracker:
                     symbol=pos.symbol,
                     token_address=pos.token_address,
                     return_pct=realized_return_pct,
+                    hold_minutes=(datetime.now(tz=timezone.utc) - pos.entry_time).total_seconds() / 60.0,
+                    entry_price=pos.entry_price_usd,
+                    exit_price=exit_price,
+                    entry_mcap=pos.entry_market_cap_usd,
+                    exit_mcap=exit_mcap,
+                    opportunity_score=pos.opportunity_score,
+                    signal_source=pos.signal_source,
+                )
+            elif reason == "STAGNANT":
+                await telegram_notifier.send_stagnant_exit(
+                    symbol=pos.symbol,
+                    token_address=pos.token_address,
+                    return_pct=realized_return_pct,
+                    mfe_pct=mfe_pct,
                     hold_minutes=(datetime.now(tz=timezone.utc) - pos.entry_time).total_seconds() / 60.0,
                     entry_price=pos.entry_price_usd,
                     exit_price=exit_price,

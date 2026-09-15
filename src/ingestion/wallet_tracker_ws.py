@@ -108,13 +108,13 @@ class WalletTrackerListener:
             except (ConnectionClosed, WebSocketException, OSError) as e:
                 logger.warning(f"[WalletTracker] WebSocket disconnected: {e}. Reconnecting in {backoff:.0f}s...")
                 await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 60.0)
+                backoff = min(backoff * 2, 30.0)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"[WalletTracker] Unexpected error: {e}. Reconnecting in {backoff:.0f}s...")
                 await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 60.0)
+                backoff = min(backoff * 2, 30.0)
 
     async def _connect_and_listen(self):
         """Open WebSocket, subscribe to tracked wallets, then listen for messages."""
@@ -294,15 +294,42 @@ class WalletTrackerListener:
         # Fire the downstream callback (Safety Filter pipeline -> Paper Trading)
         await self.on_token_callback(event)
 
-    # ------------------------------------------------------------------
-    # Token metadata fetcher (lightweight via Helius DAS)
-    # ------------------------------------------------------------------
-
     async def _fetch_token_metadata(self, mint: str) -> Optional[dict]:
         """
-        Fetch minimal metadata for a token via Helius getAsset DAS API.
-        Returns dict with symbol, name, deployer, launch_venue, etc.
+        Fetch minimal metadata for a token using a waterfall of providers:
+          1. Helius getAsset DAS API (primary)
+          2. DexScreener token API (free, no auth, high limit)
+          3. Minimal skeleton (never returns None — prevents silent event drops)
         """
+        # 1. Try Helius
+        result = await self._fetch_from_helius(mint)
+        if result:
+            return result
+
+        # 2. Fallback to DexScreener
+        logger.debug(f"[WalletTracker] Helius metadata failed for {mint[:8]}, trying DexScreener...")
+        result = await self._fetch_from_dexscreener(mint)
+        if result:
+            return result
+
+        # 3. Last resort: return skeleton so Pintu B event is NOT silently dropped
+        logger.warning(
+            f"[WalletTracker] All metadata providers failed for {mint[:8]}. "
+            f"Emitting with skeleton metadata to preserve Pintu B signal."
+        )
+        return {
+            "symbol": "UNKNOWN",
+            "name": "Unknown Token",
+            "deployer": None,
+            "launch_venue": "pump_fun" if mint.endswith("pump") else "raydium",
+            "total_supply": 1_000_000_000.0,
+            "initial_sol_liquidity": 30.0 if mint.endswith("pump") else 0.0,
+            "bonding_curve_address": None,
+            "pool_address": None,
+        }
+
+    async def _fetch_from_helius(self, mint: str) -> Optional[dict]:
+        """Primary: Helius getAsset DAS API."""
         url = f"https://mainnet.helius-rpc.com/?api-key={settings.helius_api_key}"
         payload = {
             "jsonrpc": "2.0",
@@ -313,6 +340,9 @@ class WalletTrackerListener:
         try:
             async with httpx.AsyncClient(timeout=8.0) as client:
                 resp = await client.post(url, json=payload)
+                if resp.status_code == 429:
+                    logger.warning(f"[WalletTracker] Helius 429 for {mint[:8]} — will try DexScreener fallback")
+                    return None
                 if resp.status_code != 200:
                     return None
                 data = resp.json().get("result", {})
@@ -324,7 +354,6 @@ class WalletTrackerListener:
                 token_info = data.get("token_info", {})
                 authorities = data.get("authorities", [])
 
-                # Infer launch venue from mint suffix
                 launch_venue = "pump_fun" if mint.endswith("pump") else "raydium"
 
                 deployer = None
@@ -344,7 +373,44 @@ class WalletTrackerListener:
                     "pool_address": None,
                 }
         except Exception as e:
-            logger.debug(f"[WalletTracker] Metadata fetch error for {mint[:8]}: {e}")
+            logger.debug(f"[WalletTracker] Helius fetch error for {mint[:8]}: {e}")
+            return None
+
+    async def _fetch_from_dexscreener(self, mint: str) -> Optional[dict]:
+        """Fallback: DexScreener token API — free, no auth, generous rate limits."""
+        url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(url)
+                if resp.status_code != 200:
+                    return None
+                data = resp.json()
+                pairs = data.get("pairs", [])
+                if not pairs:
+                    return None
+
+                # Use the first pair's base token info
+                base = pairs[0].get("baseToken", {})
+                symbol = base.get("symbol", "UNKNOWN")
+                name = base.get("name", "Unknown Token")
+
+                # Infer launch venue
+                dex_id = pairs[0].get("dexId", "")
+                launch_venue = "pump_fun" if "pump" in dex_id.lower() or mint.endswith("pump") else "raydium"
+
+                logger.debug(f"[WalletTracker] DexScreener fallback success for {mint[:8]} → ${symbol}")
+                return {
+                    "symbol": symbol[:20],
+                    "name": name[:60],
+                    "deployer": None,
+                    "launch_venue": launch_venue,
+                    "total_supply": 1_000_000_000.0,
+                    "initial_sol_liquidity": 30.0 if launch_venue == "pump_fun" else 0.0,
+                    "bonding_curve_address": None,
+                    "pool_address": None,
+                }
+        except Exception as e:
+            logger.debug(f"[WalletTracker] DexScreener fetch error for {mint[:8]}: {e}")
             return None
 
     # ------------------------------------------------------------------

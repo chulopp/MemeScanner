@@ -583,6 +583,58 @@ class TelegramNotifier:
         except Exception as e:
             logger.debug(f"send_timeout_hit failed: {e}")
 
+    async def send_stagnant_exit(
+        self,
+        symbol: str,
+        token_address: str,
+        return_pct: float,
+        mfe_pct: float,
+        hold_minutes: float,
+        entry_price: float = 0.0,
+        exit_price: float = 0.0,
+        entry_mcap: float = 0.0,
+        exit_mcap: float = 0.0,
+        opportunity_score: float = 0.0,
+        signal_source: str = "",
+    ) -> None:
+        """Notif saat posisi zombie ditutup karena tidak ada pergerakan setelah 30 menit (MFE < +10%).
+        Label berbeda dari TIMEOUT_4H agar mudah dianalisis di histori."""
+        if not self._enabled:
+            return
+        self._ensure_bot()
+        if not self._bot:
+            return
+
+        import html as _html
+        mcap_trajectory = ""
+        if entry_mcap > 0 and exit_mcap > 0:
+            mcap_trajectory = f"\n🧢 MC: <b>{format_mcap(entry_mcap)} ➔ {format_mcap(exit_mcap)}</b>"
+
+        price_trajectory = ""
+        if entry_price > 0 and exit_price > 0:
+            p_entry = f"${entry_price:.8f}" if entry_price < 0.01 else f"${entry_price:.6f}"
+            p_exit = f"${exit_price:.8f}" if exit_price < 0.01 else f"${exit_price:.6f}"
+            price_trajectory = f"\n💰 Entry: <b>{p_entry}</b> ➔ Exit: <b>{p_exit}</b>"
+
+        sig_info = f" ({signal_source} | Score: {opportunity_score:.1f})" if opportunity_score > 0 else ""
+        ret_emoji = "🟢" if return_pct >= 0 else "🔴"
+
+        text = (
+            f"💤 <b>Stagnancy Exit (Zombie Kill)</b>: ${_html.escape(symbol)}{sig_info}\n"
+            f"<code>{token_address}</code>\n"
+            f"{price_trajectory}{mcap_trajectory}\n"
+            f"{ret_emoji} Return: <b>{return_pct:+.1f}%</b> | 🏔 MFE: <b>{mfe_pct:+.1f}%</b>\n"
+            f"⏱ Di-hold: <b>{hold_minutes:.0f} menit</b> tanpa gerak signifikan\n"
+            f"♻️ <i>Slot dibebaskan untuk token runner berikutnya.</i>"
+        )
+        try:
+            await self._bot.send_message(
+                chat_id=self._chat_id, text=text, parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+        except Exception as e:
+            logger.debug(f"send_stagnant_exit failed: {e}")
+
     # ──────────────────────────────────────────
     # Read-only Telegram command listener
     # ──────────────────────────────────────────

@@ -307,11 +307,15 @@ class TelegramNotifier:
                 pnl_u_str = f"{'+' if pnl_u >= 0 else '-'}${abs(pnl_u):.2f}"
                 reason_str = {
                     "SL": f"🛑 Stop Loss ({pnl_u_str} / {ret:+.1f}%)",
+                    "TP0": f"🎯 TP0 Hit ({pnl_u_str} / {ret:+.1f}%)",
                     "TP1": f"🎯 TP1 Hit ({pnl_u_str} / {ret:+.1f}%)",
                     "TP2": f"🎯 TP2 Hit ({pnl_u_str} / {ret:+.1f}%)",
                     "TP3": f"🎯 TP3 Hit ({pnl_u_str} / {ret:+.1f}%)",
                     "TRAILING": f"🌙 Trailing Stop ({pnl_u_str} / {ret:+.1f}%)",
-                    "TIMEOUT_4H": f"⌛ Timeout 4H ({pnl_u_str} / {ret:+.1f}%)"
+                    "TIMEOUT_2H": f"⌛ Timeout 2H ({pnl_u_str} / {ret:+.1f}%)",
+                    "TIMEOUT_4H": f"⌛ Timeout 4H ({pnl_u_str} / {ret:+.1f}%)",
+                    "TIME_DECAY": f"⏳ Time-Decay ({pnl_u_str} / {ret:+.1f}%)",
+                    "RUG_DETECTED": f"🚨 Rug Detected ({pnl_u_str} / {ret:+.1f}%)",
                 }.get(reason, f"Ditutup ({reason}) ({pnl_u_str} / {ret:+.1f}%)")
                 trade_line = f"\n\n🤖 <b>Paper Trade:</b> ✅ Followed ({source} | Score: {score:.1f})\n• Hasil: <b>{reason_str}</b>{exit_mc_str}"
             elif pt_status == "SKIPPED":
@@ -813,14 +817,20 @@ class TelegramNotifier:
         try:
             from src.paper_trading.position_tracker import position_tracker, FROZEN_PARAMS
             open_count = await position_tracker.get_open_count()
+            v_ver = FROZEN_PARAMS.get("parameter_version", "v2.0")
+            max_h = FROZEN_PARAMS.get("max_hold_hours", 2.0)
             text = (
-                f"🤖 <b>Bot Status</b>\n"
+                f"🤖 <b>Bot Status ({v_ver})</b>\n"
+                f"────────────────────────\n"
                 f"Posisi aktif: <b>{open_count}/{FROZEN_PARAMS['max_active_positions']}</b>\n"
-                f"Threshold (frozen): <b>{FROZEN_PARAMS['opportunity_threshold']:.0f}</b>\n"
-                f"SL: <b>{FROZEN_PARAMS['stop_loss_pct']:.0f}%</b> | "
-                f"TP1: <b>+{FROZEN_PARAMS['tp1_pct']:.0f}%</b> | "
-                f"Max Hold: <b>{FROZEN_PARAMS.get('max_hold_hours', 4.0):.0f}h</b>\n"
-                f"Parameter version: <b>{FROZEN_PARAMS['parameter_version']}</b>"
+                f"Threshold Skor: <b>≥ {FROZEN_PARAMS['opportunity_threshold']:.0f}/100</b>\n"
+                f"🛡️ <b>Stop Loss:</b> -30% (Base) ➔ -15% (Time-decay >15m) | -10% (BE)\n"
+                f"🎯 <b>Take Profit:</b> TP0 +50% (15%) | TP1 +100% (25%) | TP2 +300% (25%) | TP3 +500% (15%)\n"
+                f"🌙 <b>Trailing Moonbag:</b> 25%–45% dari ATH (setelah TP3)\n"
+                f"🚨 <b>Rug Guard:</b> Exit instan jika likuiditas LP drop >80%\n"
+                f"⌛ <b>Batas Hold:</b> Max {max_h:.0f} jam (Timeout 2H)\n"
+                f"────────────────────────\n"
+                f"Parameter Version: <b>{v_ver}</b>"
             )
             await self._bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
         except Exception as e:
@@ -828,12 +838,13 @@ class TelegramNotifier:
 
     async def _cmd_pnl(self, chat_id: int) -> None:
         try:
-            from src.paper_trading.position_tracker import position_tracker
+            from src.paper_trading.position_tracker import position_tracker, FROZEN_PARAMS
             from datetime import datetime, timezone
             import html as _html
 
             summary = await position_tracker.get_portfolio_summary()
             closed = summary.get("closed_trades", [])
+            v_tag = summary.get("parameter_version", "v2.0")
 
             now_utc = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
@@ -861,17 +872,21 @@ class TelegramNotifier:
             real_sign = "+" if real_usd >= 0 else "-"
             roi_sign = "+" if summary["portfolio_roi_pct"] >= 0 else ""
 
+            all_time_cnt = summary.get("all_time_closed_count", 0)
+            all_time_pnl = summary.get("all_time_pnl_usd", 0.0)
+            all_pnl_sign = "+" if all_time_pnl >= 0 else "-"
+
             text = (
-                f"💰 <b>FINANCIAL PERFORMANCE DASHBOARD</b>\n"
+                f"💰 <b>FINANCIAL PERFORMANCE DASHBOARD ({v_tag})</b>\n"
                 f"🕐 <i>{now_utc}</i>\n"
                 f"────────────────────────\n"
-                f"💵 <b>Modal Awal:</b> ${summary['starting_capital']:.2f}\n"
+                f"💵 <b>Modal Awal (Siklus {v_tag}):</b> ${summary['starting_capital']:.2f}\n"
                 f"💎 <b>Total Ekuitas:</b> ${summary['total_equity']:.2f} (<b>{roi_sign}{summary['portfolio_roi_pct']:.1f}%</b>)\n"
                 f"💵 <b>Cash Tersedia:</b> ${summary['available_cash']:.2f}\n"
-                f"📦 <b>Alokasi Terpakai:</b> ${summary['allocated_usd']:.2f} ({summary['open_count']} posisi aktif)\n"
+                f"📦 <b>Alokasi Terpakai:</b> ${summary['allocated_usd']:.2f} ({summary['open_count']}/{FROZEN_PARAMS['max_active_positions']} posisi aktif)\n"
                 f"🔄 <b>Unrealized Floating:</b> {fl_sign}${abs(fl_usd):.2f}\n"
                 f"────────────────────────\n"
-                f"📈 <b>REALISASI TRADE (CLOSED: {len(closed)})</b>\n"
+                f"📈 <b>REALISASI TRADE SIKLUS {v_tag} (CLOSED: {len(closed)})</b>\n"
                 f"• Realized PnL: <b>{real_sign}${abs(real_usd):.2f}</b>\n"
                 f"• Win Rate: <b>{win_rate:.1f}%</b> ({len(wins)}W / {len(losses)}L)\n"
                 f"• Best Runner: <b>${best_sym} ({best_ret:+.1f}%)</b> 🚀{best_addr_line}\n"
@@ -879,6 +894,7 @@ class TelegramNotifier:
                 f"• PINTU_A Realized: <b>{pintu_a_pnl:+.2f} USD</b> ({len(pintu_a_trades)} trades)\n"
                 f"• PINTU_B Realized: <b>{pintu_b_pnl:+.2f} USD</b> ({len(pintu_b_trades)} trades)\n"
                 f"────────────────────────\n"
+                f"📜 <i>Arsip Historis Pre-{v_tag}: {all_time_cnt} trades ({all_pnl_sign}${abs(all_time_pnl):.2f})</i>\n"
                 f"ℹ️ <i>Gunakan /checkpoint_now untuk laporan audit model & statistik recall lengkap.</i>"
             )
 
@@ -888,17 +904,18 @@ class TelegramNotifier:
 
     async def _cmd_positions(self, chat_id: int) -> None:
         try:
-            from src.paper_trading.position_tracker import position_tracker
+            from src.paper_trading.position_tracker import position_tracker, FROZEN_PARAMS
             import html as _html
 
             summary = await position_tracker.get_portfolio_summary()
             open_positions = summary.get("open_positions", [])
+            v_tag = summary.get("parameter_version", "v2.0")
 
             lines = [
-                "💼 <b>PORTOFOLIO SIMULASI LIVE</b>",
+                f"💼 <b>PORTOFOLIO SIMULASI LIVE ({v_tag})</b>",
                 "─" * 30,
                 f"💵 Cash Tersedia: <b>${summary['available_cash']:.2f}</b>",
-                f"📦 Alokasi Aktif: <b>${summary['allocated_usd']:.2f}</b> ({summary['open_count']}/10 posisi)",
+                f"📦 Alokasi Aktif: <b>${summary['allocated_usd']:.2f}</b> ({summary['open_count']}/{FROZEN_PARAMS['max_active_positions']} posisi)",
             ]
 
             fl_usd = summary["total_floating_usd"]
@@ -939,7 +956,7 @@ class TelegramNotifier:
                         f"• Live: <b>{c_price}</b> (MC: <b>{c_mcap}</b>)\n"
                         f"• Floating: <b>{fl_pct:+.1f}% ({pnl_u_sign}${abs(pnl_u):.2f})</b> {fl_emoji}\n"
                         f"• Highest: <b>+{p['mfe_pct']:.1f}%</b> | Di-hold: <b>{p['hold_minutes']:.0f}m</b>\n"
-                        f"• Rules: SL <b>-30%</b> | TP1 <b>+100%</b> | Max <b>4h</b>\n"
+                        f"• Rules: SL <b>-30%/-15%</b> | BE <b>-10%</b> | TP0 <b>+50%</b> | Max <b>2h</b>\n"
                     )
 
             await self._bot.send_message(
@@ -1025,11 +1042,14 @@ class TelegramNotifier:
                 pnl_usd = pos_size * (ret / 100.0)
                 pnl_sign = "+" if pnl_usd >= 0 else "-"
                 pnl_str = f"{pnl_sign}${abs(pnl_usd):.2f}"
+                v_ver = t.get("parameter_version", "v1.1")
 
                 # Emojis
                 ret_emoji = "🟢" if ret > 0 else "🔴"
                 reason_emoji = {
-                    "SL": "🛑", "TP1": "✅", "TP2": "📚", "TP3": "💎", "TRAILING": "🌙", "TIMEOUT_4H": "⌛"
+                    "SL": "🛑", "TP0": "✅", "TP1": "✅", "TP2": "📚", "TP3": "💎",
+                    "TRAILING": "🌙", "TIMEOUT_2H": "⌛", "TIMEOUT_4H": "⌛",
+                    "TIME_DECAY": "⏳", "RUG_DETECTED": "🚨"
                 }.get(reason, "📋")
 
                 entry_str = f"${entry_p:.8f}" if entry_p < 0.01 else f"${entry_p:.6f}"
@@ -1041,7 +1061,7 @@ class TelegramNotifier:
                 x_mc_str = f" (MC: {format_mcap(exit_mcap)})" if exit_mcap > 0 else ""
 
                 block = (
-                    f"{i}. {ret_emoji} <b>${sym}</b> [{src}]\n"
+                    f"{i}. {ret_emoji} <b>${sym}</b> [{src} | {v_ver}]\n"
                     f"   {reason_emoji} Exit: <b>{pnl_str} ({ret:+.1f}%)</b> via {reason}\n"
                     f"   ⏱ Hold: <b>{hold:.0f}m</b> | Score: <b>{score:.0f}</b>\n"
                     f"   💰 Entry: {entry_str}{e_mc_str} → Exit: {exit_str}{x_mc_str}\n"

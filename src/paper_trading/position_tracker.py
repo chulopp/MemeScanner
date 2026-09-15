@@ -342,11 +342,11 @@ class PositionTracker:
             asyncio.create_task(self._notify_position_opened(pos))
             return position_id
 
-    async def get_portfolio_summary(self) -> dict:
+    async def get_portfolio_summary(self, version: Optional[str] = None) -> dict:
         """
         Computes real-time portfolio accounting instantly from in-memory cache:
-        - Starting Capital ($100.0)
-        - Realized PnL ($) from all closed trades (excluding CORRUPTED_RESET)
+        - Starting Capital ($100.0) for active cycle (v2.0)
+        - Realized PnL ($) from closed trades of the active parameter_version cycle
         - Allocated Capital ($) across currently open positions
         - Available Cash ($)
         - Floating PnL ($ and %) for each open position and total
@@ -354,6 +354,7 @@ class PositionTracker:
         """
         STARTING_CAPITAL = 100.0
         POSITION_SIZE = FROZEN_PARAMS["position_size_usd"]
+        target_version = version or FROZEN_PARAMS.get("parameter_version", "v2.0")
 
         if not db_manager._connected:
             db_manager.connect()
@@ -363,10 +364,22 @@ class PositionTracker:
             await self._recover_open_positions()
 
         all_trades = await db_manager.query("paper_trade_positions", limit=5000)
-        closed = [
+        all_closed = [
             t for t in all_trades
             if t.get("exit_reason") not in ("OPEN", None, "CORRUPTED_RESET")
             and not t.get("skipped_reason")
+        ]
+
+        # Historical all-time PnL across previous cycles (for archive reporting)
+        all_time_pnl_usd = sum(
+            float(t.get("position_size_usd", POSITION_SIZE) or POSITION_SIZE) * (float(t.get("realized_return_pct", 0.0) or 0.0) / 100.0)
+            for t in all_closed
+        )
+
+        # Scoped strictly to the active cycle version (e.g. v2.0)
+        closed = [
+            t for t in all_closed
+            if t.get("parameter_version") == target_version
         ]
 
         realized_pnl_usd = 0.0
@@ -420,6 +433,7 @@ class PositionTracker:
 
         return {
             "starting_capital": STARTING_CAPITAL,
+            "parameter_version": target_version,
             "available_cash": available_cash,
             "allocated_usd": allocated_usd,
             "open_count": len(active_list),
@@ -430,6 +444,8 @@ class PositionTracker:
             "open_positions": open_details,
             "closed_trades_count": len(closed),
             "closed_trades": closed,
+            "all_time_closed_count": len(all_closed),
+            "all_time_pnl_usd": all_time_pnl_usd,
         }
 
     # ──────────────────────────────────────────

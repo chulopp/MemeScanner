@@ -85,7 +85,7 @@ FROZEN_PARAMS = {
     # ── Other ──
     "max_active_positions": 10,       # Max simultaneous open positions
     "poll_interval_seconds": 30,      # Price polling cadence
-    "parameter_version": "v2.0",      # v2.0: Exit Engine v2 — time-decay, breakeven, TP0, tiered trailing, rug guard
+    "parameter_version": "v2.1",      # v2.1: Exit Engine v2.1 — SL capping at effective target, blended partial TP, moonbag trailing
 }
 
 POLL_DISCLAIMER = (
@@ -354,7 +354,7 @@ class PositionTracker:
         """
         STARTING_CAPITAL = 100.0
         POSITION_SIZE = FROZEN_PARAMS["position_size_usd"]
-        target_version = version or FROZEN_PARAMS.get("parameter_version", "v2.0")
+        target_version = version or FROZEN_PARAMS.get("parameter_version", "v2.1")
 
         if not db_manager._connected:
             db_manager.connect()
@@ -581,7 +581,10 @@ class PositionTracker:
                     f"🛑 [SL/{phase.upper()}] ${pos.symbol} — return {return_pct:+.1f}% "
                     f"≤ effective SL {effective_sl:+.1f}% (held {hold_minutes:.0f}m, MFE {mfe_pct:+.1f}%)"
                 )
-                await self._close_position(pos, current_price, "SL")
+                # v2.1: SL Capping — simulate live on-chain limit/trigger order fill at effective_sl
+                # Eliminates artificial 30s polling lag gap-down (-90% vs target -30%)
+                simulated_sl_price = entry * (1.0 + effective_sl / 100.0) if entry > 0 else current_price
+                await self._close_position(pos, simulated_sl_price, "SL")
                 return
 
             # ── 3. Time-decay Phase 3: Force exit (replaces stagnancy v1.3) ──
@@ -654,12 +657,10 @@ class PositionTracker:
                 pos.tp3_hit = True
                 sell_fraction = FROZEN_PARAMS["tp3_sell_fraction"]
                 pos.remaining_fraction -= sell_fraction
-                logger.info(f"🎯 [TP3] ${pos.symbol} hit +500% — selling {sell_fraction*100:.0f}%")
+                logger.info(f"🎯 [TP3] ${pos.symbol} hit +500% — selling {sell_fraction*100:.0f}% (20% moonbag remains)")
                 asyncio.create_task(self._persist_tp_state(pos))
                 asyncio.create_task(self._notify_tp_hit(pos, "TP3", return_pct, sell_fraction, current_price))
-                # After TP3, remaining 20% becomes moonbag — close main trade, continue moonbag tracking
-                await self._close_position(pos, current_price, "TP3")
-                return
+                # v2.1: DO NOT close position here. Sisa 20% moonbag tetap aktif & dikawal Section 10 (Tiered Trailing Stop).
 
             # ── 10. Tiered Trailing Stop (moonbag phase, active after TP3) ──
             # v2.0: trailing % adjusts based on how far the token has run from entry.
@@ -694,7 +695,7 @@ class PositionTracker:
     # ──────────────────────────────────────────
 
     async def _close_position(self, pos: ActivePosition, exit_price: float, reason: str) -> None:
-        """Close position: compute P&L metrics and persist to DB."""
+        """Close position: compute P&L metrics with v2.1 blended weighted TP accounting and persist to DB."""
         # Remove from active tracking first (prevent duplicate closes)
         if pos.position_id not in self._active:
             return
@@ -703,8 +704,25 @@ class PositionTracker:
         now_utc = datetime.now(tz=timezone.utc)
         entry = pos.entry_price_usd
 
-        # Compute metrics
-        realized_return_pct = ((exit_price - entry) / entry) * 100.0 if entry > 0 else 0.0
+        # Compute return on the final exit tranche
+        final_tranche_return = ((exit_price - entry) / entry) * 100.0 if entry > 0 else 0.0
+
+        # ── v2.1: Blended Weighted Return Accounting ──
+        # Sum up profits from partial TP milestones already locked in
+        tp_weighted_pct = 0.0
+        if pos.tp0_hit:
+            tp_weighted_pct += FROZEN_PARAMS["tp0_sell_fraction"] * FROZEN_PARAMS["tp0_pct"]
+        if pos.tp1_hit:
+            tp_weighted_pct += FROZEN_PARAMS["tp1_sell_fraction"] * FROZEN_PARAMS["tp1_pct"]
+        if pos.tp2_hit:
+            tp_weighted_pct += FROZEN_PARAMS["tp2_sell_fraction"] * FROZEN_PARAMS["tp2_pct"]
+        if pos.tp3_hit:
+            tp_weighted_pct += FROZEN_PARAMS["tp3_sell_fraction"] * FROZEN_PARAMS["tp3_pct"]
+
+        # Remaining bag fraction closes at final_tranche_return
+        rem_fraction = max(pos.remaining_fraction, 0.0)
+        realized_return_pct = tp_weighted_pct + (rem_fraction * final_tranche_return)
+
         mfe_pct = ((pos.price_high_ever_seen - entry) / entry) * 100.0 if entry > 0 else 0.0
 
         # captured_ratio: what fraction of the peak move was actually captured
@@ -742,9 +760,10 @@ class PositionTracker:
             "TRAILING": "🌙", "TIMEOUT_2H": "⌛", "TIME_DECAY": "⏳",
             "RUG_DETECTED": "🚨",
         }.get(reason, "📋")
+        tp_tag = f" (Blended: {realized_return_pct:+.1f}%, final tranche: {final_tranche_return:+.1f}%)" if pos.tp0_hit else f"Return: {realized_return_pct:+.1f}%"
         logger.info(
             f"{status_emoji} [Closed {reason}] ${pos.symbol} | "
-            f"Return: {realized_return_pct:+.1f}% | MFE: {mfe_pct:+.1f}% | "
+            f"{tp_tag} | MFE: {mfe_pct:+.1f}% | "
             f"Captured: {f'{captured_ratio*100:.0f}%' if captured_ratio is not None else 'N/A'} | "
             f"Hold: {hold_minutes:.0f}m"
         )

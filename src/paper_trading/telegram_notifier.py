@@ -477,13 +477,14 @@ class TelegramNotifier:
 
         sig_info = f" ({signal_source} | Score: {opportunity_score:.1f})" if opportunity_score > 0 else ""
 
+        ret_emoji = "📈" if return_pct >= 0 else "📉"
         text = (
             f"🛑 <b>Stop Loss</b>: ${_html.escape(symbol)}{sig_info}\n"
             f"<code>{token_address}</code>\n"
             f"{price_trajectory}{mcap_trajectory}\n"
-            f"📉 Return: <b>{return_pct:+.1f}%</b>\n"
+            f"{ret_emoji} Net Return: <b>{return_pct:+.1f}%</b>\n"
             f"⏱ Di-hold: <b>{hold_minutes:.0f} menit</b>\n"
-            f"⚠️ <i>Disclaimer: angka ini dari polling 30s, bisa 10-30% lebih buruk di pasar nyata.</i>"
+            f"🛡️ <i>Simulasi eksekusi stop-loss on-chain (terisi di target level).</i>"
         )
         try:
             await self._bot.send_message(

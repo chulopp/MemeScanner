@@ -63,10 +63,10 @@ FROZEN_PARAMS = {
     "tp3_sell_fraction": 0.15,        # v2.0: Sell 15% at TP3 (was 20%)
     "moonbag_fraction": 0.20,         # 20% moonbag after TP3 (unchanged)
 
-    # ── Tiered Trailing Stop (replaces flat 40% from ATH) ──
-    # Active after TP3 (moonbag phase). Trailing % based on current ATH return.
-    "trailing_tier1_max_return": 200.0,  # v2.0: ATH return 50%-200% → 25% trailing
-    "trailing_tier1_pct": 25.0,
+    # ── Tiered Trailing Stop (v2.2: Active once ATH return >= +30%) ──
+    "trailing_start_return_pct": 30.0,   # v2.2: Active once token ATH return >= +30%
+    "trailing_tier1_max_return": 200.0,  # ATH return 30%-200% → 20% trailing
+    "trailing_tier1_pct": 20.0,          # v2.2: Trail 20% from ATH (was 25%)
     "trailing_tier2_max_return": 500.0,  # v2.0: ATH return 200%-500% → 35% trailing
     "trailing_tier2_pct": 35.0,
     "trailing_tier3_pct": 45.0,          # v2.0: ATH return >500% → 45% trailing
@@ -85,7 +85,7 @@ FROZEN_PARAMS = {
     # ── Other ──
     "max_active_positions": 10,       # Max simultaneous open positions
     "poll_interval_seconds": 30,      # Price polling cadence
-    "parameter_version": "v2.1",      # v2.1: Exit Engine v2.1 — SL capping at effective target, blended partial TP, moonbag trailing
+    "parameter_version": "v2.2",      # v2.2: Exit Engine v2.2 — Early trailing stop (+30% ATH, 20% trail)
 }
 
 POLL_DISCLAIMER = (
@@ -662,17 +662,19 @@ class PositionTracker:
                 asyncio.create_task(self._notify_tp_hit(pos, "TP3", return_pct, sell_fraction, current_price))
                 # v2.1: DO NOT close position here. Sisa 20% moonbag tetap aktif & dikawal Section 10 (Tiered Trailing Stop).
 
-            # ── 10. Tiered Trailing Stop (moonbag phase, active after TP3) ──
-            # v2.0: trailing % adjusts based on how far the token has run from entry.
-            if pos.tp3_hit:
-                ath_return_pct = ((pos.price_high_ever_seen - entry) / entry) * 100.0
-                drop_from_ath = ((current_price - pos.price_high_ever_seen) / pos.price_high_ever_seen) * 100.0
+            # ── 10. Tiered Trailing Stop ──
+            # v2.2: Active once token ATH return >= trailing_start_return_pct (+30%), protecting runners
+            trailing_start = FROZEN_PARAMS.get("trailing_start_return_pct", 30.0)
+            ath_return_pct = ((pos.price_high_ever_seen - entry) / entry) * 100.0 if entry > 0 else 0.0
+
+            if ath_return_pct >= trailing_start:
+                drop_from_ath = ((current_price - pos.price_high_ever_seen) / pos.price_high_ever_seen) * 100.0 if pos.price_high_ever_seen > 0 else 0.0
 
                 # Determine trailing tier based on ATH return
                 t1_max = FROZEN_PARAMS["trailing_tier1_max_return"]
                 t2_max = FROZEN_PARAMS["trailing_tier2_max_return"]
                 if ath_return_pct <= t1_max:
-                    trailing_pct = FROZEN_PARAMS["trailing_tier1_pct"]   # 25%
+                    trailing_pct = FROZEN_PARAMS["trailing_tier1_pct"]   # 20%
                 elif ath_return_pct <= t2_max:
                     trailing_pct = FROZEN_PARAMS["trailing_tier2_pct"]   # 35%
                 else:
@@ -680,7 +682,7 @@ class PositionTracker:
 
                 if drop_from_ath <= -trailing_pct:
                     logger.info(
-                        f"🌙 [TRAILING] ${pos.symbol} moonbag tiered trailing triggered — "
+                        f"🌙 [TRAILING] ${pos.symbol} tiered trailing triggered — "
                         f"ATH: +{ath_return_pct:.0f}%, dropped {drop_from_ath:.0f}% from ATH "
                         f"(tier: {trailing_pct:.0f}% trailing)"
                     )

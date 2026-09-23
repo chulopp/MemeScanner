@@ -36,6 +36,10 @@ class Settings(BaseSettings):
         default="wss://pumpportal.fun/api/data",
         validation_alias="PUMPPORTAL_WS_URL"
     )
+    pumpportal_api_key: str = Field(
+        default="",
+        validation_alias="PUMPPORTAL_API_KEY"
+    )  # If set, enables metered subscribeAccountTrade for Smart Money wallet tracking
 
     # Safety Filter Thresholds (Hipotesis Awal)
     max_dev_buy_pct: float = Field(default=10.0, validation_alias="MAX_DEV_BUY_PCT")
@@ -52,8 +56,9 @@ class Settings(BaseSettings):
     score_w_social_meta: float = Field(default=0.10, validation_alias="SCORE_W_SOCIAL_META")        # Bobot Social Meta [HIPOTESIS_AWAL]
 
     # --- Volume Velocity & Buy/Sell Ratio Thresholds [HIPOTESIS_AWAL] ---
-    vol_velocity_buy_sell_ratio_max: float = Field(default=5.0, validation_alias="VOL_VELOCITY_BUY_SELL_RATIO_MAX")  # Ratio >= 5.0 -> 100 skor
-    vol_velocity_window_seconds: int = Field(default=300, validation_alias="VOL_VELOCITY_WINDOW_SECONDS")            # Window 5 menit
+    vol_velocity_buy_sell_ratio_max: float = Field(default=5.0, validation_alias="VOL_VELOCITY_BUY_SELL_RATIO_MAX")    # Ratio >= 5.0 -> 100 skor
+    vol_velocity_organic_ratio_max: float = Field(default=6.5, validation_alias="VOL_VELOCITY_ORGANIC_RATIO_MAX")     # Ratio > 6.5 with sells -> artificial pump [HIPOTESIS_B]
+    vol_velocity_window_seconds: int = Field(default=300, validation_alias="VOL_VELOCITY_WINDOW_SECONDS")              # Window 5 menit
 
     # --- Smart Money Promotion & Demotion Thresholds [HIPOTESIS_AWAL] ---
     smart_money_min_trades: int = Field(default=20, validation_alias="SMART_MONEY_MIN_TRADES")
@@ -66,6 +71,7 @@ class Settings(BaseSettings):
 
     # --- Fase 5: Paper Trading & Telegram ---
     opportunity_threshold: float = Field(default=31.0, validation_alias="OPPORTUNITY_THRESHOLD")  # Calibrated Fase C
+    min_liquidity_usd_filter: float = Field(default=10_000.0, validation_alias="MIN_LIQUIDITY_USD_FILTER")  # Reject tokens with liquidity < $10k at T+2 [HIPOTESIS_A]
 
     telegram_bot_token: str = Field(default="", validation_alias="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: str = Field(default="", validation_alias="TELEGRAM_CHAT_ID")

@@ -1,7 +1,7 @@
 import asyncio
 from typing import Callable, Awaitable, Optional
 from src.ingestion.schemas import RawTokenEvent
-from src.ingestion.pumpportal_ws import PumpPortalListener
+from src.ingestion.pumpportal_ws import PumpPortalUnifiedClient
 from src.ingestion.raydium_ws import RaydiumListener
 from src.utils.redis_client import redis_manager
 from src.database.client import db_manager
@@ -14,7 +14,10 @@ class IngestionManager:
 
     def __init__(self, on_token_event: Optional[Callable[[RawTokenEvent], Awaitable[None]]] = None):
         self.on_token_event = on_token_event
-        self.pump_listener = PumpPortalListener(self._handle_raw_token)
+        self.pump_listener = PumpPortalUnifiedClient(
+            on_new_token=self._handle_raw_token,
+            on_wallet_trade=None,  # Smart Money cache update handled internally in unified client
+        )
         self.raydium_listener = RaydiumListener(self._handle_raw_token)
         self._running = False
 

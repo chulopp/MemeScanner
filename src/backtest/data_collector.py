@@ -16,7 +16,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from src.ingestion.schemas import RawTokenEvent
-from src.ingestion.pumpportal_ws import PumpPortalListener
+from src.ingestion.pumpportal_ws import PumpPortalUnifiedClient
 from src.ingestion.raydium_ws import RaydiumListener
 from src.database.client import db_manager
 from src.utils.price_feed import price_feed

@@ -293,11 +293,39 @@ class VolumeVelocityEngine:
             else:
                 # ── Trenches Momentum Volume Scaling ──
                 ratio = buy_count / max(sell_count, 1.0)
+
+                # ── Hipotesis B: Artificial Pump Detection [HIPOTESIS_B] ──
+                # Ratio sangat tinggi + ada sell = sinyal dev wash-trade / artificial pump.
+                # Jika sell_count == 0 (token brand-new, belum ada yang jual), tidak di-reject
+                # karena bisa organik di menit pertama.
+                organic_cap = settings.vol_velocity_organic_ratio_max
+                if ratio > organic_cap and sell_count > 0:
+                    logger.info(
+                        f"⚠️ [{mint_address[:8]}] Net buy pressure {ratio:.1f}x > {organic_cap}x cap "
+                        f"with {sell_count} sell(s) — marking as artificial pump. Weight redistributed."
+                    )
+                    return VolumeVelocityResult(
+                        score=0.0,
+                        buy_count=buy_count,
+                        sell_count=sell_count,
+                        buy_volume_sol=round(buy_vol_sol, 4),
+                        sell_volume_sol=round(sell_vol_sol, 4),
+                        net_buy_pressure_ratio=round(ratio, 2),
+                        provider_used=provider_used,
+                        is_successful=False,  # Weight teredistribusi ke komponen lain
+                        raw_data={
+                            "note": f"Artificial pump: ratio {ratio:.1f}x > cap {organic_cap}x",
+                            "buy_count": buy_count,
+                            "sell_count": sell_count,
+                        }
+                    )
+
                 max_ratio = settings.vol_velocity_buy_sell_ratio_max
                 # Ratio score represents buy pressure (0-100)
                 ratio_score = min((ratio / max_ratio) * 100.0, 100.0)
                 if sell_count > buy_count:
                     ratio_score *= 0.5
+
 
                 # Total nominal volume in SOL (buy + sell)
                 total_vol_sol = buy_vol_sol + sell_vol_sol

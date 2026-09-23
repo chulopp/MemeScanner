@@ -85,7 +85,7 @@ FROZEN_PARAMS = {
     # ── Other ──
     "max_active_positions": 10,       # Max simultaneous open positions
     "poll_interval_seconds": 30,      # Price polling cadence
-    "parameter_version": "v2.2",      # v2.2: Exit Engine v2.2 — Early trailing stop (+30% ATH, 20% trail)
+    "parameter_version": "v2.3",      # v2.3: Stage 2 Filter Likuiditas >= $10k (Hipotesis A) + Net Buy Pressure Cap 6.5x (Hipotesis B) + Unified PumpPortal (Free Mode)
 }
 
 POLL_DISCLAIMER = (

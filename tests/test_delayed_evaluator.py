@@ -63,14 +63,21 @@ async def test_delayed_evaluator_process_token_scores_and_records(mock_token_eve
     mock_score_res.opportunity_score = 75.0
     mock_score_res.breakdown = {"vol_velocity": 80}
 
+    # PriceSnapshot-like mock with liquidity above $10k threshold (Hipotesis A gate)
+    mock_price_snap = MagicMock()
+    mock_price_snap.liquidity_usd = 50_000.0  # $50k — passes the $10k minimum
+    mock_price_snap.price_usd = 0.001
+
     with patch("src.opportunity.scorer.OpportunityScorer.score_token", AsyncMock(return_value=mock_score_res)):
         with patch("src.paper_trading.signal_recorder.record_signal", AsyncMock(return_value="sig-123")) as mock_record:
             with patch("src.paper_trading.outcome_worker.outcome_worker.schedule_signal", AsyncMock()) as mock_sched:
-                with patch("src.paper_trading.price_fetcher.fetch_price", AsyncMock(return_value=None)):
-                    await evaluator._process_token(mock_token_event.token_address, payload)
+                with patch("src.paper_trading.price_fetcher.fetch_price", AsyncMock(return_value=mock_price_snap)):
+                    with patch("src.ingestion.pumpportal_ws.get_smart_money_buyers", return_value=[]):
+                        await evaluator._process_token(mock_token_event.token_address, payload)
 
-                    mock_record.assert_called_once()
-                    mock_sched.assert_called_once()
+                        mock_record.assert_called_once()
+                        mock_sched.assert_called_once()
+
 
 
 @pytest.mark.asyncio
@@ -116,15 +123,22 @@ async def test_stage2_signal_recording_retries_on_failure(mock_token_event):
     mock_score_res.opportunity_score = 75.0
     mock_score_res.breakdown = {"vol_velocity": 80}
 
+    # PriceSnapshot-like mock with liquidity above $10k threshold (Hipotesis A gate)
+    mock_price_snap = MagicMock()
+    mock_price_snap.liquidity_usd = 50_000.0  # $50k — passes the $10k minimum
+    mock_price_snap.price_usd = 0.001
+
     with patch("src.opportunity.scorer.OpportunityScorer.score_token", AsyncMock(return_value=mock_score_res)):
         with patch("src.paper_trading.signal_recorder.record_signal", side_effect=flaky_record):
             with patch("src.paper_trading.outcome_worker.outcome_worker.schedule_signal", AsyncMock()):
-                with patch("src.paper_trading.price_fetcher.fetch_price", AsyncMock(return_value=None)):
-                    await evaluator._process_token(mock_token_event.token_address, payload)
+                with patch("src.paper_trading.price_fetcher.fetch_price", AsyncMock(return_value=mock_price_snap)):
+                    with patch("src.ingestion.pumpportal_ws.get_smart_money_buyers", return_value=[]):
+                        await evaluator._process_token(mock_token_event.token_address, payload)
 
     # Harus dipanggil 2x: attempt 1 gagal, retry berhasil
     assert call_count == 2, (
         f"record_signal seharusnya dipanggil 2x (1 gagal + 1 retry), tapi dipanggil {call_count}x. "
         "Pastikan _process_token punya retry logic untuk signal recording."
     )
+
 

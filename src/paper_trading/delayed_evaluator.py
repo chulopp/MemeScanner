@@ -25,6 +25,7 @@ from typing import Optional
 
 from src.ingestion.schemas import RawTokenEvent
 from src.utils.logger import logger
+from src.config import settings
 
 DELAYED_EVAL_KEY = "delayed_eval"
 STAGE1_CACHE_PREFIX = "stage1_cache:"
@@ -144,7 +145,44 @@ class DelayedEvaluator:
                 return
 
             scorer = OpportunityScorer()
-            score_result = await scorer.score_token(event)
+
+            # ── Hipotesis A: Liquidity Gate [HIPOTESIS_A] ──
+            # Reject token dengan liquidity < $10k pada saat evaluasi T+2.
+            # Fetch price snapshot akurat (bukan estimate dari initial_sol_liquidity).
+            from src.paper_trading.price_fetcher import fetch_price
+            price_snap = None
+            try:
+                price_snap = await fetch_price(event.token_address)
+            except Exception:
+                pass
+
+            entry_liq = price_snap.liquidity_usd if price_snap else 0.0
+            min_liq = settings.min_liquidity_usd_filter  # Default: 10_000.0
+
+            if entry_liq > 0 and entry_liq < min_liq:
+                logger.info(
+                    f"🚫 [Stage 2] {symbol} REJECTED (Hipotesis A): "
+                    f"Liquidity ${entry_liq:,.0f} < ${min_liq:,.0f} minimum. Skipping scoring."
+                )
+                return
+
+            # ── Fix Bug: candidate_wallets dari Smart Money Cache ──
+            # Lookup wallet Smart Money yang sudah beli token ini (di-cache oleh PumpPortalUnifiedClient).
+            # Sebelumnya bug: scorer.score_token(event) dipanggil tanpa candidate_wallets,
+            # sehingga hanya deployer yang dicek dan matching selalu 0.
+            from src.ingestion.pumpportal_ws import get_smart_money_buyers
+            smart_money_buyers = get_smart_money_buyers(event.token_address)
+
+            if smart_money_buyers:
+                logger.info(
+                    f"💎 [Stage 2] {symbol}: {len(smart_money_buyers)} Smart Money buyer(s) "
+                    f"found in cache → passing to scorer: {[w[:8]+'...' for w in smart_money_buyers]}"
+                )
+
+            score_result = await scorer.score_token(
+                event,
+                candidate_wallets=smart_money_buyers if smart_money_buyers else None
+            )
 
             logger.info(
                 f"🎯 [Stage 2 T+2] {symbol} → Score: {score_result.opportunity_score:.1f}/100 "
@@ -152,7 +190,6 @@ class DelayedEvaluator:
             )
 
             # Push to paper trading signal recording if score passes threshold
-            from src.config import settings
             opp_thresh = getattr(settings, "opportunity_threshold", 60.0)
             if score_result.opportunity_score >= opp_thresh:
                 try:

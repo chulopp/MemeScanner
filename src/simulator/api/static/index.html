@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MemeScanner Simulator</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <!-- ═══ HEADER ═══════════════════════════════════════════════════════════ -->
+  <header class="header">
+    <div class="header-left">
+      <span class="logo">🧪</span>
+      <div>
+        <h1 class="header-title">MemeScanner Simulator</h1>
+        <p class="header-subtitle">Offline Backtester & Exit Parameter Optimizer</p>
+      </div>
+    </div>
+    <div class="header-right" id="dataset-meta">
+      <span class="meta-badge" id="meta-total">— trades</span>
+      <span class="meta-badge" id="meta-dates">Loading...</span>
+      <button class="btn btn-ghost btn-sm" onclick="refreshDataset()">↻ Refresh</button>
+    </div>
+  </header>
+
+  <!-- ═══ MAIN LAYOUT ══════════════════════════════════════════════════════ -->
+  <main class="main-layout">
+
+    <!-- ══ LEFT PANEL — Parameter Form ══════════════════════════════════ -->
+    <aside class="panel panel-config" id="config-panel">
+      <div class="panel-header">
+        <h2>⚙️ Parameters</h2>
+        <div class="panel-header-actions">
+          <button class="btn btn-ghost btn-sm" onclick="resetDefaults()">Reset v2.1</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <form id="config-form">
+
+          <div class="param-section">
+            <h3 class="param-section-title">🎯 Entry Filter</h3>
+            <div class="param-row">
+              <label>Threshold</label>
+              <input type="number" id="opportunity_threshold" value="60" step="1" min="0" max="100">
+              <span class="param-unit">/ 100</span>
+            </div>
+          </div>
+
+          <div class="param-section">
+            <h3 class="param-section-title">🛑 Stop Loss</h3>
+            <div class="param-row">
+              <label>Base SL</label>
+              <input type="number" id="stop_loss_pct" value="-30" step="1" max="0">
+              <span class="param-unit">%</span>
+            </div>
+            <div class="param-row">
+              <label>Breakeven Trigger</label>
+              <input type="number" id="breakeven_trigger_pct" value="50" step="5" min="0">
+              <span class="param-unit">%</span>
+            </div>
+            <div class="param-row">
+              <label>Breakeven SL</label>
+              <input type="number" id="breakeven_sl_pct" value="-10" step="1" max="0">
+              <span class="param-unit">%</span>
+            </div>
+          </div>
+
+          <div class="param-section">
+            <h3 class="param-section-title">⏱️ Time-Decay</h3>
+            <div class="param-row">
+              <label>Tighten at</label>
+              <input type="number" id="time_decay_tighten_minutes" value="15" step="5" min="0">
+              <span class="param-unit">min</span>
+            </div>
+            <div class="param-row">
+              <label>Force Exit at</label>
+              <input type="number" id="time_decay_exit_minutes" value="30" step="5" min="0">
+              <span class="param-unit">min</span>
+            </div>
+            <div class="param-row">
+              <label>MFE Threshold</label>
+              <input type="number" id="time_decay_mfe_threshold_pct" value="15" step="5" min="0">
+              <span class="param-unit">%</span>
+            </div>
+            <div class="param-row">
+              <label>Tightened SL</label>
+              <input type="number" id="time_decay_sl_tighten_pct" value="-15" step="1" max="0">
+              <span class="param-unit">%</span>
+            </div>
+          </div>
+
+          <div class="param-section">
+            <h3 class="param-section-title">💰 Take Profit</h3>
+            <div class="param-row">
+              <label>TP0 Trigger</label>
+              <input type="number" id="tp0_pct" value="50" step="10" min="0">
+              <span class="param-unit">%</span>
+            </div>
+            <div class="param-row">
+              <label>TP0 Sell</label>
+              <input type="number" id="tp0_sell_fraction" value="0.15" step="0.05" min="0" max="1">
+              <span class="param-unit">frac</span>
+            </div>
+            <div class="param-row">
+              <label>TP1 Trigger</label>
+              <input type="number" id="tp1_pct" value="100" step="25" min="0">
+              <span class="param-unit">%</span>
+            </div>
+            <div class="param-row">
+              <label>TP1 Sell</label>
+              <input type="number" id="tp1_sell_fraction" value="0.25" step="0.05" min="0" max="1">
+              <span class="param-unit">frac</span>
+            </div>
+            <div class="param-row">
+              <label>TP2 Trigger</label>
+              <input type="number" id="tp2_pct" value="300" step="50" min="0">
+              <span class="param-unit">%</span>
+            </div>
+            <div class="param-row">
+              <label>TP2 Sell</label>
+              <input type="number" id="tp2_sell_fraction" value="0.25" step="0.05" min="0" max="1">
+              <span class="param-unit">frac</span>
+            </div>
+            <div class="param-row">
+              <label>TP3 Trigger</label>
+              <input type="number" id="tp3_pct" value="500" step="100" min="0">
+              <span class="param-unit">%</span>
+            </div>
+            <div class="param-row">
+              <label>TP3 Sell</label>
+              <input type="number" id="tp3_sell_fraction" value="0.15" step="0.05" min="0" max="1">
+              <span class="param-unit">frac</span>
+            </div>
+          </div>
+
+          <div class="param-section">
+            <h3 class="param-section-title">🌙 Trailing Stop</h3>
+            <div class="param-row">
+              <label>Activate at</label>
+              <input type="number" id="trailing_start_return_pct" value="500" step="50" min="0">
+              <span class="param-unit">%</span>
+            </div>
+            <div class="param-row">
+              <label>Tier 1 Trail</label>
+              <input type="number" id="trailing_tier1_pct" value="25" step="5" min="0" max="100">
+              <span class="param-unit">% ATH</span>
+            </div>
+            <div class="param-row">
+              <label>Tier 2 Trail</label>
+              <input type="number" id="trailing_tier2_pct" value="35" step="5" min="0" max="100">
+              <span class="param-unit">% ATH</span>
+            </div>
+            <div class="param-row">
+              <label>Tier 3 Trail</label>
+              <input type="number" id="trailing_tier3_pct" value="45" step="5" min="0" max="100">
+              <span class="param-unit">% ATH</span>
+            </div>
+          </div>
+
+          <div class="param-section">
+            <h3 class="param-section-title">⚖️ Sizing & Hold</h3>
+            <div class="param-row">
+              <label>Position Risk</label>
+              <input type="number" id="position_risk_pct" value="2" step="0.5" min="0.1" max="20">
+              <span class="param-unit">% equity</span>
+            </div>
+            <div class="param-row">
+              <label>Max Hold</label>
+              <input type="number" id="max_hold_hours" value="2" step="0.5" min="0.5">
+              <span class="param-unit">hours</span>
+            </div>
+          </div>
+
+          <div class="config-actions">
+            <button class="btn btn-primary" type="button" onclick="runScenario()" id="btn-run">
+              ▶ Run Scenario
+            </button>
+            <button class="btn btn-secondary" type="button" onclick="openSweepModal()" id="btn-sweep">
+              ⊞ Grid Sweep
+            </button>
+          </div>
+        </form>
+      </div>
+    </aside>
+
+    <!-- ══ RIGHT PANEL — Results ══════════════════════════════════════════ -->
+    <section class="results-area">
+
+      <!-- Summary Cards -->
+      <div class="summary-cards" id="summary-cards">
+        <div class="card card--muted">
+          <span class="card-label">ROI</span>
+          <span class="card-value" id="card-roi">—</span>
+        </div>
+        <div class="card card--muted">
+          <span class="card-label">Final Equity</span>
+          <span class="card-value" id="card-equity">—</span>
+        </div>
+        <div class="card card--muted">
+          <span class="card-label">Win Rate</span>
+          <span class="card-value" id="card-winrate">—</span>
+        </div>
+        <div class="card card--muted">
+          <span class="card-label">Max Drawdown</span>
+          <span class="card-value" id="card-dd">—</span>
+        </div>
+        <div class="card card--muted">
+          <span class="card-label">Trades Entered</span>
+          <span class="card-value" id="card-trades">—</span>
+        </div>
+        <div class="card card--muted">
+          <span class="card-label">Avg MFE Captured</span>
+          <span class="card-value" id="card-mfe-capt">—</span>
+        </div>
+      </div>
+
+      <!-- Tabs -->
+      <div class="tabs">
+        <button class="tab active" id="tab-chart" onclick="switchTab('chart')">📈 Equity Curve</button>
+        <button class="tab" id="tab-trades" onclick="switchTab('trades')">📋 Trade Inspector</button>
+        <button class="tab" id="tab-leaderboard" onclick="switchTab('leaderboard')">🏆 Leaderboard</button>
+        <button class="tab" id="tab-heatmap" onclick="switchTab('heatmap')">🌡️ Heatmap</button>
+      </div>
+
+      <!-- Panel: Equity Curve -->
+      <div class="tab-content" id="content-chart">
+        <div class="chart-wrapper">
+          <canvas id="equity-chart"></canvas>
+        </div>
+        <p class="chart-hint" id="chart-hint">Run a scenario to see the equity curve.</p>
+      </div>
+
+      <!-- Panel: Trade Inspector -->
+      <div class="tab-content hidden" id="content-trades">
+        <div class="table-controls">
+          <input type="text" class="search-input" id="trade-search" placeholder="Search symbol..." oninput="filterTrades()">
+          <select class="filter-select" id="trade-exit-filter" onchange="filterTrades()">
+            <option value="">All Exit Reasons</option>
+            <option value="SL">SL</option>
+            <option value="TIME_DECAY">TIME_DECAY</option>
+            <option value="TRAILING">TRAILING</option>
+            <option value="TIMEOUT">TIMEOUT</option>
+            <option value="BREAKEVEN_SL">BREAKEVEN_SL</option>
+          </select>
+        </div>
+        <div class="table-container">
+          <table class="data-table" id="trade-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Symbol</th>
+                <th>Score</th>
+                <th>MFE</th>
+                <th>Hold</th>
+                <th>Sim Return</th>
+                <th>Act Return</th>
+                <th>Sim Exit</th>
+                <th>PnL</th>
+              </tr>
+            </thead>
+            <tbody id="trade-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Panel: Leaderboard -->
+      <div class="tab-content hidden" id="content-leaderboard">
+        <p class="empty-state" id="leaderboard-empty">Run a Grid Sweep to see the leaderboard.</p>
+        <div class="table-container">
+          <table class="data-table" id="leaderboard-table" style="display:none">
+            <thead>
+              <tr>
+                <th>Rank</th>
+                <th>Scenario</th>
+                <th>ROI</th>
+                <th>Win Rate</th>
+                <th>Max DD</th>
+                <th>Trades</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="leaderboard-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Panel: Heatmap -->
+      <div class="tab-content hidden" id="content-heatmap">
+        <div class="heatmap-controls">
+          <select id="heatmap-x" class="filter-select">
+            <option value="">X Axis Param...</option>
+          </select>
+          <select id="heatmap-y" class="filter-select">
+            <option value="">Y Axis Param...</option>
+          </select>
+          <select id="heatmap-metric" class="filter-select">
+            <option value="roi_pct">ROI (%)</option>
+            <option value="win_rate">Win Rate</option>
+            <option value="max_drawdown_pct">Max Drawdown</option>
+          </select>
+          <button class="btn btn-secondary btn-sm" onclick="renderHeatmap()">Generate Heatmap</button>
+        </div>
+        <div class="chart-wrapper">
+          <canvas id="heatmap-chart"></canvas>
+        </div>
+        <p class="empty-state" id="heatmap-empty">Run a Grid Sweep first, then select parameters.</p>
+      </div>
+
+    </section>
+  </main>
+
+  <!-- ═══ SWEEP MODAL ════════════════════════════════════════════════════ -->
+  <div class="modal-overlay hidden" id="sweep-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>⊞ Configure Grid Sweep</h2>
+        <button class="btn btn-ghost" onclick="closeSweepModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-hint">Enter comma-separated values for each parameter to sweep. Leave blank to use current form value.</p>
+        <div id="sweep-params-form"></div>
+      </div>
+      <div class="modal-footer">
+        <span id="sweep-combo-count" class="combo-count">0 combinations</span>
+        <button class="btn btn-ghost" onclick="closeSweepModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="runSweep()" id="btn-run-sweep">▶ Run Sweep</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ TRADE DETAIL MODAL ═════════════════════════════════════════════ -->
+  <div class="modal-overlay hidden" id="trade-modal">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <h2 id="trade-modal-title">Trade Detail</h2>
+        <button class="btn btn-ghost" onclick="closeTradeModal()">✕</button>
+      </div>
+      <div class="modal-body" id="trade-modal-body"></div>
+    </div>
+  </div>
+
+  <!-- ═══ LOADING OVERLAY ═══════════════════════════════════════════════ -->
+  <div class="loading-overlay hidden" id="loading">
+    <div class="loading-spinner"></div>
+    <p id="loading-text">Running simulation...</p>
+  </div>
+
+  <script src="/static/main.js"></script>
+</body>
+</html>

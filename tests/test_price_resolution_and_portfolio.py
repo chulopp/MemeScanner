@@ -167,10 +167,10 @@ async def test_trenches_volume_scaling(monkeypatch):
     res_low = await volume_velocity_engine.calculate_velocity("TestLowVol11111111111111111111111111111111pump")
     assert res_low.score <= 20.0, f"Expected low-volume ghost token to be capped <= 20, got {res_low.score}"
 
-    # Case 2: High trenches momentum (6.5 SOL) with 10 buys, 1 sell -> full momentum score
+    # Case 2: High trenches momentum (6.5 SOL) with 6 buys, 1 sell → ratio 6.0x (below 6.5 cap) → full momentum score
     async def mock_high_vol(mint, cutoff, init_buy):
         return {
-            "buy_count": 10, "sell_count": 1, "buy_vol_sol": 6.0, "sell_vol_sol": 0.5, "provider": "test"
+            "buy_count": 6, "sell_count": 1, "buy_vol_sol": 6.0, "sell_vol_sol": 0.5, "provider": "test"
         }
     monkeypatch.setattr(volume_velocity_engine, "_fetch_from_helius", mock_high_vol)
     res_high = await volume_velocity_engine.calculate_velocity("TestHighVol111111111111111111111111111111pump")

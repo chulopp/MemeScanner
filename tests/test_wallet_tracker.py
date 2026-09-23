@@ -1,12 +1,15 @@
 """
-Unit tests for Pintu B: WalletTrackerListener
+Unit tests for Pintu B: Smart Money Wallet Tracking via PumpPortalUnifiedClient
 
-Tests cover:
-  1. SWAP BUY detection from Helius WebSocket messages
-  2. Conviction gate (rejects < 0.5 SOL, accepts >= 0.5 SOL)
-  3. Token mint filtering (skips WSOL and other non-memecoin mints)
-  4. RawTokenEvent source attribution (source='WALLET_TRACKER')
-  5. Wallet sync and dynamic tracking set management
+NOTE: The original Helius WebSocket-based WalletTrackerListener has been replaced
+by PumpPortalUnifiedClient (pumpportal_ws.py) which uses a single PumpPortal WS
+connection for both new token discovery and wallet tracking.
+
+Tests for the new Smart Money cache (record/lookup/prune) are in:
+  tests/test_opportunity_scoring.py::test_smart_money_cache_*
+
+Legacy WalletTrackerListener tests below are SKIPPED — they test deleted code.
+They are preserved for reference/audit trail only.
 """
 
 from __future__ import annotations
@@ -18,11 +21,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timezone
 
 from src.ingestion.schemas import RawTokenEvent
-from src.ingestion.wallet_tracker_ws import (
-    WalletTrackerListener,
-    MIN_CONVICTION_SOL,
-    _SKIP_MINTS,
-)
+# WalletTrackerListener removed — now integrated into PumpPortalUnifiedClient
+# from src.ingestion.wallet_tracker_ws import WalletTrackerListener, MIN_CONVICTION_SOL, _SKIP_MINTS
 from src.discovery.wallet_replay_audit import (
     SwapEvent,
     RoundTripTrade,
@@ -30,6 +30,12 @@ from src.discovery.wallet_replay_audit import (
     _match_round_trips,
     WalletAuditReport,
 )
+
+# Compatibility stubs so legacy tests below can still be collected without ImportError
+MIN_CONVICTION_SOL = 0.5
+_SKIP_MINTS = set()
+WalletTrackerListener = None  # Deleted — see pumpportal_ws.PumpPortalUnifiedClient
+
 
 
 # ---------------------------------------------------------------------------

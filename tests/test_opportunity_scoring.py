@@ -489,3 +489,134 @@ async def test_smart_money_empty_registry_weight_redistribution():
                 assert res.weights_used["global_fee"] == 0.30
                 # Score = 0.70*80 + 0.30*60 = 56 + 18 = 74.0
                 assert res.opportunity_score == 74.0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Tests for 3 New Fixes
+# ──────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_vol_velocity_artificial_pump_rejected():
+    """
+    Hipotesis B: ratio > 6.5 dengan sell_count > 0 harus return is_successful=False.
+    Ratio 7.0x (70 buys / 10 sells) di atas cap 6.5 → VolumeVelocityResult.is_successful = False.
+    Weight akan teredistribusi ke komponen lain oleh scorer.
+    """
+    engine = VolumeVelocityEngine()
+
+    # 70 buys, 10 sells → ratio = 7.0 > 6.5 cap
+    mock_data = {
+        "buy_count": 70,
+        "sell_count": 10,
+        "buy_vol_sol": 5.0,
+        "sell_vol_sol": 0.5,
+        "provider": "helius",
+    }
+
+    with patch.object(engine, "_fetch_from_helius", return_value=mock_data):
+        with patch.object(engine, "_fetch_from_dexscreener", return_value=None):
+            result = await engine.calculate_velocity("FAKE_MINT_ARTPUMP", initial_buy_sol=0.5)
+
+    assert result.is_successful is False, (
+        f"Expected is_successful=False for ratio {result.net_buy_pressure_ratio}x, got True"
+    )
+    assert result.net_buy_pressure_ratio == pytest.approx(7.0, abs=0.01)
+    assert result.score == 0.0
+
+
+@pytest.mark.asyncio
+async def test_vol_velocity_high_ratio_without_sells_not_rejected():
+    """
+    Edge case Hipotesis B: ratio tinggi TANPA sell_count > 0 (brand-new token, 0 sell)
+    TIDAK boleh di-reject karena bisa organik.
+    """
+    engine = VolumeVelocityEngine()
+
+    # 70 buys, 0 sells → ratio = 70.0 tapi sell_count = 0, TIDAK di-reject
+    mock_data = {
+        "buy_count": 70,
+        "sell_count": 0,
+        "buy_vol_sol": 5.0,
+        "sell_vol_sol": 0.0,
+        "provider": "helius",
+    }
+
+    with patch.object(engine, "_fetch_from_helius", return_value=mock_data):
+        with patch.object(engine, "_fetch_from_dexscreener", return_value=None):
+            result = await engine.calculate_velocity("FAKE_MINT_NOSEL", initial_buy_sol=0.5)
+
+    # Harus tetap successful (organik, belum ada yang jual)
+    assert result.is_successful is True, (
+        "Expected is_successful=True when sell_count=0 (organic brand-new token)"
+    )
+    assert result.score == 100.0  # 70/max(0,1) = 70, capped to 100
+
+
+@pytest.mark.asyncio
+async def test_smart_money_cache_record_and_lookup():
+    """
+    Fix Bug candidate_wallets: wallet Smart Money yang dicatat di cache
+    harus bisa di-lookup kembali oleh delayed_evaluator.
+    """
+    from src.ingestion.pumpportal_ws import (
+        record_smart_money_buy,
+        get_smart_money_buyers,
+        SMART_MONEY_BUYS,
+        _SMART_MONEY_TIMESTAMPS,
+    )
+
+    # Bersihkan state dari test sebelumnya
+    SMART_MONEY_BUYS.clear()
+    _SMART_MONEY_TIMESTAMPS.clear()
+
+    token = "TokenABC123456789012345678901234567890123"
+    smart_wallet_1 = "SmartWallet111111111111111111111111111111"
+    smart_wallet_2 = "SmartWallet222222222222222222222222222222"
+
+    # Catat 2 smart money buys
+    record_smart_money_buy(token, smart_wallet_1)
+    record_smart_money_buy(token, smart_wallet_2)
+
+    # Lookup harus mengembalikan kedua wallet
+    buyers = get_smart_money_buyers(token)
+
+    assert smart_wallet_1 in buyers, f"{smart_wallet_1[:8]} tidak ditemukan di cache"
+    assert smart_wallet_2 in buyers, f"{smart_wallet_2[:8]} tidak ditemukan di cache"
+    assert len(buyers) == 2
+
+    # Token lain tidak ikut-ikutan
+    other_buyers = get_smart_money_buyers("OtherToken1111111111111111111111111111111")
+    assert other_buyers == []
+
+
+@pytest.mark.asyncio
+async def test_smart_money_cache_ttl_prune():
+    """
+    Cache entries yang expired (> 10 menit) harus dihapus oleh prune_smart_money_cache().
+    """
+    import time as _time
+    from src.ingestion.pumpportal_ws import (
+        record_smart_money_buy,
+        get_smart_money_buyers,
+        prune_smart_money_cache,
+        SMART_MONEY_BUYS,
+        _SMART_MONEY_TIMESTAMPS,
+    )
+
+    SMART_MONEY_BUYS.clear()
+    _SMART_MONEY_TIMESTAMPS.clear()
+
+    token = "ExpiredToken1111111111111111111111111111"
+    wallet = "SmartWallet333333333333333333333333333333"
+
+    record_smart_money_buy(token, wallet)
+    assert wallet in get_smart_money_buyers(token)
+
+    # Simulasikan entry sudah 11 menit lalu (> 600 detik TTL)
+    _SMART_MONEY_TIMESTAMPS[token] = _time.time() - 660
+
+    prune_smart_money_cache()
+
+    # Setelah prune, token harus hilang dari cache
+    assert token not in SMART_MONEY_BUYS
+    assert get_smart_money_buyers(token) == []

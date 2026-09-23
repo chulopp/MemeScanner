@@ -60,3 +60,4 @@ coverage.xml
 scratch/
 temp/
 backtest_results/*.json
+exports/
